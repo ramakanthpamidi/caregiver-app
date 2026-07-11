@@ -1,0 +1,5 @@
+-----BEGIN CERTIFICATE-----
+MIID...REPLACE_WITH_YOUR_CA_CERT...IDAQAB
+-----END CERTIFICATE-----
+
+<!-- Replace this placeholder with your CA cert (PEM). -->

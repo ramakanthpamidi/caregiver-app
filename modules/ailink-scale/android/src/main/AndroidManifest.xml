@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application>
+        <!-- The AILink SDK routes all BLE traffic through this bound service -->
+        <service
+            android:name="com.pingwang.bluetoothlib.server.ELinkBleServer"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+</manifest>

@@ -1,0 +1,28 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.ailinkscale'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.ailinkscale"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+repositories {
+  maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+  // AILink (elinkthings) BLE core + parsing/algorithm libraries for the
+  // 8-electrode body fat scale. Resolved from JitPack.
+  // Parsing lib must be >= a version that try/catches the packet parser —
+  // 1.9.13 crashes (ArrayIndexOutOfBounds) on the scale's short status packets.
+  implementation 'com.github.elinkthings:AILinkSDKRepositoryAndroid:1.15.04'
+  implementation 'com.github.elinkthings:AILinkSDKParsingLibraryAndroid:1.9.20'
+}

@@ -1,0 +1,140 @@
+import { StyleSheet } from 'react-native';
+import { Colors, Radius, Spacing, Typography } from '../../../shared/theme/theme';
+
+export const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.surface },
+  responsiveShell: {
+    flex: 1,
+    justifyContent: 'space-between',
+    backgroundColor: Colors.surface,
+  },
+  contentStack: {
+    width: '100%',
+    flexGrow: 1,
+  },
+  contentStackCentered: {
+    justifyContent: 'center',
+  },
+  contentStackKeyboard: {
+    justifyContent: 'flex-start',
+  },
+  authHeroSection: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+  },
+  logo: { width: 72, height: 72, marginBottom: 4 },
+  brand: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: Colors.primary,
+    marginBottom: 14,
+  },
+  heroTextWrap: {
+    width: '92%',
+    alignItems: 'center',
+    marginBottom: Spacing.xl,
+  },
+  eyebrow: {
+    fontSize: Typography.caption,
+    fontWeight: '700',
+    color: Colors.primary,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: Spacing.sm,
+  },
+  heroTitle: {
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: '800',
+    color: Colors.text,
+    textAlign: 'center',
+    marginBottom: Spacing.sm,
+  },
+  heroSubtitle: {
+    fontSize: Typography.body,
+    lineHeight: 20,
+    color: Colors.textSubtle,
+    textAlign: 'center',
+  },
+  authFormSection: {
+    width: '100%',
+    height: 'auto',
+    alignSelf: 'center',
+    marginBottom: Spacing.xl,
+  },
+  authCardTitle: {
+    fontSize: 30,
+    fontWeight: '800',
+    marginBottom: Spacing.sm,
+    color: Colors.primary,
+    textAlign: 'center',
+  },
+  authCardSubtitle: {
+    fontSize: Typography.body,
+    lineHeight: 20,
+    color: Colors.textSubtle,
+    textAlign: 'center',
+    marginBottom: Spacing.xl,
+  },
+  input: {
+    height: 52,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    paddingHorizontal: 14,
+    paddingVertical: 0,
+    marginBottom: Spacing.md,
+    backgroundColor: Colors.surfaceMuted,
+    includeFontPadding: false,
+    fontSize: 15,
+    color: Colors.text,
+  },
+  passwordInputRow: { width: '100%', position: 'relative', marginBottom: 12 },
+  passwordInputRowWithTooltip: {},
+  passwordInput: {},
+  passwordToggle: {
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+    alignItems: 'center',
+  },
+  primaryActionButton: {
+    marginTop: Spacing.xl,
+    marginBottom: 6,
+  },
+  authDividerRow: { width: '100%', alignItems: 'center', marginVertical: 0 },
+  dividerLine: {
+    width: '100%',
+    height: 1,
+    backgroundColor: Colors.border,
+    opacity: 0.9,
+  },
+  dividerText: {
+    color: Colors.textSubtle,
+    fontSize: Typography.body,
+    letterSpacing: 0.8,
+  },
+  socialAuthRow: {
+    width: '100%',
+    marginTop: 0,
+    marginBottom: 0,
+    gap: Spacing.md,
+  },
+  socialAuthButton: { width: '100%' },
+  socialIcon: { width: 26, height: 26 },
+  inlineSignupRow: {
+    width: '100%',
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.lg,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  noAccountText: { fontSize: Typography.body, color: Colors.textSubtle },
+  linkText: { color: Colors.primary, fontWeight: '700' },
+  formFieldRow: { width: '100%', position: 'relative', marginBottom: 12 },
+  formFieldRowWithTooltip: {},
+  inputError: { borderColor: Colors.danger },
+});
+
+export default styles;
