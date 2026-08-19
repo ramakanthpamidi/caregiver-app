@@ -13,7 +13,7 @@ import { facebookBackendAuthenticate, facebookSignInGetProfile, facebookSignOutI
 import { lineBackendAuthenticate, lineSignInGetProfile, lineSignOutIfPossible } from '../../profiles/services/lineAuth';
 import { useAuthActions } from '../state/authContext';
 import { useOnboardingDraft } from '../../../shared/contexts/onboardingDraftContext';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 import LanguageDropdown from '../../../shared/components/LanguageDropdown';
 import { useLanguage } from '../../../shared/i18n/LanguageContext';
 import { t } from '../../../shared/i18n';
@@ -628,7 +628,7 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
 
     setLoading(true);
     try {
-      const resp = await fetch(apiUrl('/users'), {
+      const resp = await fetch(authApiUrl('/users'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_label: nameValue, email: emailValue, password: passwordValue }),

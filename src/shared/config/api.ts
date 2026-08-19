@@ -1,4 +1,11 @@
-export const API_BASE_URL = 'https://bpscaregiver.com';
+export const API_BASE_URL = 'http://157.85.102.79:8085';
+
+function joinUrl(base: string, path: string): string {
+  if (!path) return base;
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  const prefix = path.startsWith('/') ? '' : '/';
+  return `${base}${prefix}${path}`;
+}
 
 /**
  * Build a full API URL from a path.
@@ -6,8 +13,9 @@ export const API_BASE_URL = 'https://bpscaregiver.com';
  * - Passes through fully-qualified URLs unchanged
  */
 export function apiUrl(path: string): string {
-  if (!path) return API_BASE_URL;
-  if (path.startsWith('http://') || path.startsWith('https://')) return path;
-  const prefix = path.startsWith('/') ? '' : '/';
-  return `${API_BASE_URL}${prefix}${path}`;
+  return joinUrl(API_BASE_URL, path);
+}
+
+export function authApiUrl(path: string): string {
+  return apiUrl(path);
 }

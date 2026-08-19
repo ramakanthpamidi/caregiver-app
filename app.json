@@ -15,7 +15,15 @@
         "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to connect to health devices.",
         "NSBluetoothPeripheralUsageDescription": "This app uses Bluetooth to connect to health devices.",
         "NSLocationWhenInUseUsageDescription": "Location is required for Bluetooth scanning on some devices.",
-        "NSPhotoLibraryUsageDescription": "This app needs photo access to set profile pictures."
+        "NSPhotoLibraryUsageDescription": "This app needs photo access to set profile pictures.",
+        "SKAdNetworkItems": [
+          {
+            "SKAdNetworkIdentifier": "v9wttpbfk9.skadnetwork"
+          },
+          {
+            "SKAdNetworkIdentifier": "n38lu8286q.skadnetwork"
+          }
+        ]
       }
     },
     "android": {
@@ -37,7 +45,8 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.CAMERA",
-        "android.permission.READ_MEDIA_IMAGES"
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.INTERNET"
       ]
     },
     "web": {
@@ -45,6 +54,7 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "./plugins/withCleartextTraffic",
       "expo-router",
       "expo-font",
       "expo-secure-store",
@@ -93,9 +103,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "697f038a-5ed1-4bf6-b6aa-cfd9ca8c984d"
+        "projectId": "0f759dd6-0e23-4e47-b30d-9299569d7878"
       }
     },
-    "owner": "venkatar"
+    "owner": "vajraevcharger"
   }
 }

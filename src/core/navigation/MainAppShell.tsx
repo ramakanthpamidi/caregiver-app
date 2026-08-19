@@ -61,7 +61,7 @@ import LineNotifyOverlay from '../../features/profiles/components/LineNotifyOver
 import AppLoadingScreen from '../../shared/components/AppLoadingScreen';
 import DialogFrame from '../../shared/components/DialogFrame';
 
-const APP_UPDATE_ENDPOINT = 'https://bpscaregiver.com/app-config';
+const APP_UPDATE_ENDPOINT = 'http://157.85.102.79:8085/app-config';
 const APP_UPDATE_IGNORE_KEY = 'appUpdateIgnoredVersion.v1';
 const APP_VERSION = (() => {
   try {

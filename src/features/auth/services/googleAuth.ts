@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { GoogleSignin, isSuccessResponse, statusCodes } from '@react-native-google-signin/google-signin';
 
 import { GOOGLE_SIGNIN_CLIENT_IDS, GOOGLE_WEB_CLIENT_ID } from '../../../shared/config/google';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 
 export type GoogleProfile = {
   idToken: string;
@@ -105,7 +105,7 @@ export async function googleBackendAuthenticate(params: {
   mode?: 'login' | 'signup';
 }): Promise<GoogleBackendAuthResult> {
   const mode = params.mode || 'signup';
-  const resp = await fetch(apiUrl('/auth/google'), {
+  const resp = await fetch(authApiUrl('/auth/google'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id_token: params.idToken, user_label: params.userLabel, mode }),

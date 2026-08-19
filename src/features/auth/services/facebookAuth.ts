@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AccessToken, LoginManager, Profile } from 'react-native-fbsdk-next';
 
 import { FACEBOOK_APP_ID } from '../../../shared/config/facebook';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 
 export type FacebookProfile = {
   accessToken: string;
@@ -61,7 +61,7 @@ export async function facebookBackendAuthenticate(params: {
   accessToken: string;
   userLabel?: string;
 }): Promise<FacebookBackendAuthResult> {
-  const resp = await fetch(apiUrl('/auth/facebook'), {
+  const resp = await fetch(authApiUrl('/auth/facebook'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ access_token: params.accessToken, user_label: params.userLabel }),
