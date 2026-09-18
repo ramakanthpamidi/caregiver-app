@@ -1,16 +1,16 @@
-import React, { useEffect } from 'react';
-import { LogBox, StyleSheet, Platform } from 'react-native';
 import { Stack } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import React, { useEffect } from 'react';
+import { LogBox, Platform, StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
-import * as SplashScreen from 'expo-splash-screen';
 import AppProviders from '../src/core/providers/AppProviders';
 import { AuthSessionProvider } from '../src/features/auth/state/authContext';
 import { DialogPortalProvider } from '../src/shared/components/DialogPortalProvider';
-import { ToastHost } from '../src/shared/ui/toast';
 import { installGlobalTypography } from '../src/shared/theme/globalTypography';
+import { ToastHost } from '../src/shared/ui/toast';
 // Preserve the original vitals/BLE flow (patient/* routes) alongside the ported app.
 import { PatientProvider } from '../context/PatientContext';
 
@@ -62,9 +62,7 @@ export default function RootLayout() {
                   <Stack.Screen name="index" />
                   <Stack.Screen name="(auth)" />
                   <Stack.Screen name="(main)" />
-                  <Stack.Screen name="patient" />
-                  <Stack.Screen name="ble-scanner" />
-                </Stack>
+                  </Stack>
                 <ToastHost />
               </DialogPortalProvider>
             </PatientProvider>

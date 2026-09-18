@@ -53,9 +53,6 @@ function getScaleNative(): ScaleNative | null {
 // ---- listeners ------------------------------------------------------------
 const listeners = new Set<(event: AILinkScaleEvent) => void>();
 function emit(event: AILinkScaleEvent) {
-  if (event.type === 'complete' || event.type === 'connected' || event.type === 'error') {
-    console.log('[ailink-adapter] emit', event.type, 'weightKg=', event.weightKg, 'listeners=', listeners.size);
-  }
   for (const listener of listeners) {
     try { listener({ ts: Date.now(), ...event }); } catch { /* ignore */ }
   }
@@ -116,46 +113,50 @@ export function addAilinkScaleListener(listener: (event: AILinkScaleEvent) => vo
   return () => { listeners.delete(listener); };
 }
 
-// ---- discovery (ble-plx) --------------------------------------------------
-let discoveryActive = false;
-export function startAilinkDiscovery() {
-  if (discoveryActive) return;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getManager, deviceNameOf } = require('../../../ble/bleClient');
-    const manager = getManager();
-    discoveryActive = true;
-    emit({ type: 'scan_started' });
-    manager.startDeviceScan(null, { allowDuplicates: false }, (err: any, device: any) => {
-      if (err || !device) return;
-      const name = deviceNameOf(device);
-      if (AILINK_NAME_PATTERN.test(name) || isWeightScaleText(name)) {
-        emit({
-          type: 'scan',
-          mac: device.id,
-          name: device.name || device.localName,
-          displayName: device.name || device.localName,
-        });
-      }
-    });
-  } catch { /* ble unavailable */ }
-}
 
-export function stopAilinkDiscovery() {
-  if (!discoveryActive) return;
-  discoveryActive = false;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getManager } = require('../../../ble/bleClient');
-    getManager().stopDeviceScan();
-  } catch { /* ignore */ }
-}
-
-// ---- monitoring (our native module, by registered MAC) --------------------
+// ---- monitoring: piggyback the device monitor's scan, native connect --------
+// The native AILink SDK scan does not reliably match this scale's advertisement
+// (it broadcasts on the F0A0 UUID). And this adapter must NEVER run its own
+// ble-plx scan: the device monitor (bleLiveMonitor) owns the single ble-plx
+// scan, and ble-plx allows one scan per manager — a second scan kills the Yuwell
+// device discovery.
+//
+// bleLiveMonitor already scans ALL advertising devices, so it sees the scale
+// too. It calls notifyAilinkDeviceSeen() for every scanned device; when our
+// target scale is spotted advertising (i.e. the user just stepped on), we fire a
+// single direct native connect, which lands immediately because the scale is up
+// right now. No extra scan, no ble-plx conflict.
 let monitorSub: { remove: () => void } | null = null;
 let monitorMac: string | null = null;
+let monitorMacSet = new Set<string>();
 let monitorActive = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let connectInFlight = false;
+let connectWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+function normalizeMac(value: string) {
+  return String(value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+}
+
+/**
+ * Called by the device monitor's ble-plx scan for every advertising device.
+ * When the target scale is seen, connect once via the native SDK.
+ */
+export function notifyAilinkDeviceSeen(mac: string) {
+  if (!monitorActive || connectInFlight) return;
+  const id = normalizeMac(mac);
+  if (!id || !monitorMacSet.has(id)) return;
+
+  const native = getScaleNative();
+  if (!native) return;
+  connectInFlight = true;
+  emit({ type: 'connecting', mac });
+  native.start?.(mac, 30000);
+
+  // Watchdog: if the connect doesn't land (no 'connected' event), release the
+  // guard so the next advertisement can retry instead of getting stuck.
+  if (connectWatchdog) clearTimeout(connectWatchdog);
+  connectWatchdog = setTimeout(() => { connectInFlight = false; }, 15000);
+}
 
 export function startAilinkMonitoring(options: {
   deviceIds: string[];
@@ -164,7 +165,8 @@ export function startAilinkMonitoring(options: {
   const native = getScaleNative();
   if (!native) return;
 
-  const mac = (options.deviceIds || []).find(Boolean) || null;
+  const ids = (options.deviceIds || []).filter(Boolean);
+  const mac = ids.find(Boolean) || null;
   if (!mac) return;
 
   // Restarting with the same device? Leave the existing session running.
@@ -173,30 +175,35 @@ export function startAilinkMonitoring(options: {
   stopAilinkMonitoring();
   monitorActive = true;
   monitorMac = mac;
+  monitorMacSet = new Set(ids.map(normalizeMac).filter(Boolean));
 
   const p = options.profile;
-  native.setUserInfo?.(p?.sex ?? 1, p?.age ?? 30, p?.heightCm ?? 170);
+  native.setUserInfo?.(p?.sex ?? 1, p?.age ?? 30, p?.heightCm ?? 160);
   native.initialize?.();
 
   monitorSub = native.addListener('onScaleEvent', (e: any) => {
     const translated = translate(e);
     if (translated) emit(translated);
-    // Keep the monitor alive: reconnect after the scale drops (user stepped off).
-    if (e?.type === 'disconnected' && monitorActive && monitorMac) {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(() => {
-        if (monitorActive && monitorMac) native.start?.(monitorMac, 30000);
-      }, 1500);
+
+    if (e?.type === 'connected') {
+      connectInFlight = true; // hold the guard for the whole session
+      if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
+    }
+    // Scale dropped (stepped off / measurement done) or a connect failed:
+    // release the guard so the next advertisement (next step-on) reconnects.
+    if ((e?.type === 'disconnected' || e?.type === 'error') && monitorActive) {
+      connectInFlight = false;
+      if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
     }
   });
-
-  native.start?.(mac, 30000);
 }
 
 export function stopAilinkMonitoring() {
   monitorActive = false;
   monitorMac = null;
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  monitorMacSet = new Set();
+  connectInFlight = false;
+  if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
   try { monitorSub?.remove(); } catch { /* ignore */ }
   monitorSub = null;
   try { getScaleNative()?.stop?.(); } catch { /* ignore */ }

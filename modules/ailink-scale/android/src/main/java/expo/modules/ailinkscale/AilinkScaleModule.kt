@@ -65,14 +65,11 @@ class AilinkScaleModule : Module() {
   // finished values after the app answers its sync-user-info request. We reply
   // with setUserInfo, stream weight, and emit the full result on onTestSuccess.
   private val fatCallback = object : EightBodyFatMcuDeviceData.onEightBodyFatMcuCallback {
-    override fun onState(type: Int, state: Int) {
-      Log.d(TAG, "onState type=0x${type.toString(16)} state=0x${state.toString(16)}")
-    }
+    override fun onState(type: Int, state: Int) {}
 
     override fun onSyncUserInfo() {
       // The scale blocks on this until it gets a profile. userId=1, userType=0
       // (normal) mirror the vendor demo defaults.
-      Log.d(TAG, "onSyncUserInfo → setUserInfo(sex=$userSex age=$userAge h=$userHeightCm)")
       deviceData?.setUserInfo(1, 0, userSex, userAge, userHeightCm)
       if (sessionActive) emit("type" to "note", "message" to "Measuring body composition — stand still…")
     }
@@ -103,17 +100,13 @@ class AilinkScaleModule : Module() {
       if (sessionActive) emit("type" to "error", "message" to "The scale reported error code $code")
     }
 
-    override fun showData(data: String?) {
-      Log.d(TAG, "packet: $data")
-    }
+    override fun showData(data: String?) {}
 
     override fun onBodyFatData(step: Int, info: EightBodyFatMcuDeviceData.EightBodyFatInfo?) {
       // Progress during onboard computation; final values arrive in onTestSuccess.
-      Log.d(TAG, "onBodyFatData step=$step")
     }
 
     override fun onTestSuccess(info: EightBodyFatMcuDeviceData.EightBodyFatInfo?) {
-      Log.d(TAG, "onTestSuccess: bfr=${info?.bfr} rom=${info?.rom} bmi=${info?.bmi}")
       if (!sessionActive || finished) return
       if (info == null) {
         emitWeightOnly()

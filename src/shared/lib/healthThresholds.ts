@@ -129,8 +129,8 @@ export function evaluateGlucose(values: GlucoseValues): HealthStatusLevel {
  * Warning: 35.0-35.4°C or 37.8-38.5°C
  * Critical: < 35°C (hypothermia) or > 38.5°C (high fever)
  */
-export function evaluateTemperature(values: TemperatureValues): HealthStatusLevel {
-  const { celsius } = values;
+export function evaluateTemperature(values: TemperatureValues | Record<string, number>): HealthStatusLevel {
+  const celsius = Number((values as TemperatureValues).celsius ?? (values as Record<string, number>).c);
   
   // Critical - hypothermia or high fever
   if (celsius < 35 || celsius > 38.5) {
@@ -252,13 +252,14 @@ export function toWidgetOverallStatus(status: HealthStatusLevel): 'ALERT' | 'WAR
 /**
  * Generate alert title based on reading type and status
  */
-export function getAlertTitle(type: 'bp' | 'spo2' | 'glucose' | 'temp', status: HealthStatusLevel, lang: 'en' | 'th' = 'en'): string {
+export function getAlertTitle(type: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi', status: HealthStatusLevel, lang: 'en' | 'th' = 'en'): string {
   if (lang === 'th') {
     const typeNamesTh = {
       bp: 'ความดันโลหิต',
       spo2: 'ระดับออกซิเจน',
       glucose: 'น้ำตาลในเลือด',
       temp: 'อุณหภูมิร่างกาย',
+      bmi: 'ดัชนีมวลกาย',
     };
     const statusLabelsTh = {
       Critical: 'วิกฤต',
@@ -274,6 +275,7 @@ export function getAlertTitle(type: 'bp' | 'spo2' | 'glucose' | 'temp', status: 
     spo2: 'Oxygen Level',
     glucose: 'Blood Glucose',
     temp: 'Temperature',
+    bmi: 'BMI',
   };
   
   const statusLabels = {
@@ -290,7 +292,7 @@ export function getAlertTitle(type: 'bp' | 'spo2' | 'glucose' | 'temp', status: 
  * Generate alert message based on reading type, status, and values
  */
 export function getAlertMessage(
-  type: 'bp' | 'spo2' | 'glucose' | 'temp',
+  type: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi',
   status: HealthStatusLevel,
   values: Record<string, number>,
   lang: 'en' | 'th' = 'en'
@@ -343,7 +345,7 @@ export function getAlertMessage(
         return `ระดับน้ำตาลในเลือดของคุณ (${mgdl} mg/dL) อยู่ในเกณฑ์ปกติ`;
       }
       case 'temp': {
-        const { celsius } = values;
+        const celsius = Number(values.celsius ?? values.c);
         if (status === 'Critical') {
           if (celsius < 35) {
             return `อุณหภูมิร่างกายของคุณ (${celsius.toFixed(1)}°C) บ่งชี้ภาวะอุณหภูมิร่างกายต่ำ กรุณาให้ความอบอุ่นและพบแพทย์`;
@@ -357,6 +359,13 @@ export function getAlertMessage(
           return `อุณหภูมิร่างกายของคุณ (${celsius.toFixed(1)}°C) อยู่ในเกณฑ์ที่ยอมรับได้`;
         }
         return `อุณหภูมิร่างกายของคุณ (${celsius.toFixed(1)}°C) ปกติดี`;
+      }
+      case 'bmi': {
+        const b = values.bmi;
+        if (status === 'Critical') return `ค่าดัชนีมวลกาย (BMI ${b}) อยู่ในระดับที่ต้องระวัง ควรปรึกษาแพทย์`;
+        if (status === 'Warning') return `ค่าดัชนีมวลกาย (BMI ${b}) อยู่นอกเกณฑ์ปกติ ควรปรึกษาแพทย์เรื่องการดูแลน้ำหนัก`;
+        if (status === 'Good') return `ค่าดัชนีมวลกาย (BMI ${b}) สูงกว่าเกณฑ์ปกติเล็กน้อย`;
+        return `ค่าดัชนีมวลกาย (BMI ${b}) อยู่ในเกณฑ์สุขภาพดี`;
       }
     }
   }
@@ -411,7 +420,7 @@ export function getAlertMessage(
     }
     
     case 'temp': {
-      const { celsius } = values;
+      const celsius = Number(values.celsius ?? values.c);
       if (status === 'Critical') {
         if (celsius < 35) {
           return `Your body temperature (${celsius.toFixed(1)}°C) indicates hypothermia. Seek warmth and medical attention.`;
@@ -426,33 +435,51 @@ export function getAlertMessage(
       }
       return `Your body temperature (${celsius.toFixed(1)}°C) is normal.`;
     }
+
+    case 'bmi': {
+      const b = values.bmi;
+      if (status === 'Critical') {
+        return `Your BMI (${b}) is in a critical range. Please consult your clinician about a weight-management plan.`;
+      }
+      if (status === 'Warning') {
+        return `Your BMI (${b}) is outside the healthy range. Consider a weight-management plan with your clinician.`;
+      }
+      if (status === 'Good') {
+        return `Your BMI (${b}) is slightly above the healthy range. Regular activity and balanced meals can help.`;
+      }
+      return `Your BMI (${b}) is within the healthy range.`;
+    }
   }
 }
 
 /**
  * Format reading text for display
  */
-export function formatReadingText(type: 'bp' | 'spo2' | 'glucose' | 'temp', values: Record<string, number>): string {
+export function formatReadingText(type: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi', values: Record<string, number>): string {
   switch (type) {
     case 'bp':
-      return values.pulse 
+      return values.pulse
         ? `${values.sys}/${values.dia} mmHg • ${values.pulse} bpm`
         : `${values.sys}/${values.dia} mmHg`;
     case 'spo2':
-      return values.pulse 
+      return values.pulse
         ? `${values.spo2}% / ${values.pulse} bpm`
         : `${values.spo2}%`;
     case 'glucose':
       return `${values.mgdl} mg/dL`;
-    case 'temp':
-      return `${values.celsius.toFixed(1)}°C`;
+    case 'temp': {
+      const celsius = Number(values.celsius ?? values.c);
+      return Number.isFinite(celsius) ? `${celsius.toFixed(1)}°C` : '';
+    }
+    case 'bmi':
+      return values.kg ? `BMI ${values.bmi} • ${values.kg} kg` : `BMI ${values.bmi}`;
   }
 }
 
 /**
  * Get device name for a reading type
  */
-export function getDeviceNameForType(type: 'bp' | 'spo2' | 'glucose' | 'temp'): string {
+export function getDeviceNameForType(type: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi'): string {
   switch (type) {
     case 'bp':
       return 'Blood Pressure Monitor';
@@ -462,5 +489,7 @@ export function getDeviceNameForType(type: 'bp' | 'spo2' | 'glucose' | 'temp'): 
       return 'Glucose Meter';
     case 'temp':
       return 'Thermometer';
+    case 'bmi':
+      return 'Body Fat Scale';
   }
 }

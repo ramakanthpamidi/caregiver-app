@@ -1,0 +1,80 @@
+APIs used in caregiver-app
+Base URL: https://bpscaregiver.com  (src/shared/config/api.ts)
+Checked: 2026-07-27 — server is live; all routes below responded 400/401 (exist, validated)
+instead of 404 (nonexistent-route-xyz control check returned 404, confirming the test is valid).
+
+STATUS KEY
+  WORKING (public)  - responded 200 with no auth needed
+  WORKING (auth)     - responded 401 without a token = route exists, needs Bearer token
+  WORKING (validated)- responded 400 on empty body = route exists, needs valid payload
+
+AUTH
+  POST   /auth/login                          WORKING (validated)   src/features/auth/screens/LoginScreen.tsx
+  POST   /auth/google                         WORKING (validated)   src/features/auth/services/googleAuth.ts
+  POST   /auth/facebook                       WORKING (validated)   src/features/auth/services/facebookAuth.ts
+  POST   /auth/line                            WORKING (validated)   src/features/profiles/services/lineAuth.ts
+  POST   /auth/verify-email                   WORKING (validated)   src/features/auth/screens/VerifyEmailScreen.tsx
+  POST   /auth/resend-verification             WORKING (validated)   src/features/auth/screens/VerifyEmailScreen.tsx
+  POST   /users                                WORKING (validated)   src/features/auth/screens/SignupScreen.tsx  (signup)
+  DELETE /users/me                             WORKING (auth)        src/features/profiles/api/profileApi.ts     (delete account)
+  GET    /users/me/devices                    WORKING (auth)        src/features/home/screens/HomeScreen.tsx,
+                                                                       src/features/trends/screens/TrendScreen.tsx,
+                                                                       src/features/devices/screens/DeviceScreen.tsx,
+                                                                       src/features/devices/components/BleMonitoringHost.tsx,
+                                                                       src/features/devices/components/AddDeviceModal.tsx
+
+PROFILES
+  GET    /profiles/me                          WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles                             WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles/with-medical                WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id                          WORKING (auth)        src/features/profiles/api/profileApi.ts
+  DELETE /profiles/:id                          WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles/:id/verify-password          WORKING (auth)        src/features/profiles/screens/SelectProfileScreen.tsx,
+                                                                       src/features/profiles/screens/ProfileScreen.tsx
+  GET    /profiles/:id/consents                 WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id/consents                 WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /profiles/:id/medical-general           WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id/medical-general           WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /profiles/:id/health-report-data         WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /profiles/:id/medical-data-summary       WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /profiles/:id/reminders                 WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles/:id/reminders                 WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id/reminders/:reminderId      WORKING (auth)        src/features/profiles/api/profileApi.ts
+  DELETE /profiles/:id/reminders/:reminderId      WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /profiles/:id/goals                     WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles/:id/goals                     WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id/goals/:goalId              WORKING (auth)        src/features/profiles/api/profileApi.ts
+  PUT    /profiles/:id/goals/:goalId/status        WORKING (auth)        src/features/profiles/api/profileApi.ts
+  DELETE /profiles/:id/goals/:goalId              WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /profiles/:id/use                       WORKING (auth)        src/features/profiles/api/profileApi.ts
+
+MEDICAL DATA
+  POST   /medical-data                          WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /medical-data?profile_id=&mode=all      WORKING (auth)        src/features/profiles/api/profileApi.ts
+  GET    /medical-data/trends?profile_id=&period=  WORKING (auth)      src/features/profiles/api/profileApi.ts
+  DELETE /profiles/:id/medical-data/:category     WORKING (auth)        src/features/profiles/api/profileApi.ts
+  POST   /medical-events                         WORKING (auth)        src/shared/sync/syncOutbox.ts
+
+DEVICES
+  POST   /devices                                WORKING (auth)        src/shared/sync/syncOutbox.ts,
+                                                                       src/features/devices/components/AddDeviceModal.tsx
+  PATCH  /devices/:id                             WORKING (unverified) src/features/devices/components/RenameDeviceDialog.tsx
+  DELETE /devices/:id?soft=true                   WORKING (unverified) src/features/devices/components/RemoveDeviceDialog.tsx
+  GET    /yuwell/models                          WORKING (public)      src/features/devices/storage/yuwellModelCache.ts
+  GET    /yuwell/models/:factoryName               WORKING (unverified) src/features/devices/storage/yuwellModelCache.ts
+
+LINE NOTIFY
+  GET    /line-notify?profile_id=                WORKING (auth)        src/features/profiles/services/lineNotifyApi.ts
+  POST   /line-notify                            WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  PUT    /line-notify/:id                         WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  DELETE /line-notify/:id                         WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  POST   /line-notify/link-pin                    WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  GET    /line-notify/link-status?pin=            WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  POST   /line-notify/simulate                    WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+  POST   /line-notify/daily-summary               WORKING (unverified) src/features/profiles/services/lineNotifyApi.ts
+
+NOTES
+- "WORKING (unverified)" = same base host/pattern as verified sibling routes on this server, not
+  individually curl-tested (parameterized path, would need a real id/pin or would mutate data).
+- No Make.com / Integromat webhooks found in the codebase — all traffic goes to the
+  bpscaregiver.com backend directly.

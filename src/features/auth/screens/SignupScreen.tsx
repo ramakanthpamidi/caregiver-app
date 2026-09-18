@@ -627,8 +627,12 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
     }
 
     setLoading(true);
+    const signupUrl = apiUrl('/users');
     try {
-      const resp = await fetch(apiUrl('/users'), {
+      if (__DEV__) {
+        console.log('[signup] POST', signupUrl);
+      }
+      const resp = await fetch(signupUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_label: nameValue, email: emailValue, password: passwordValue }),
@@ -640,6 +644,10 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
         data = JSON.parse(text);
       } catch {
         data = null;
+      }
+
+      if (__DEV__) {
+        console.log('[signup] status', resp.status, 'body', text?.slice?.(0, 300));
       }
 
       if (resp.status === 201 || resp.ok) {
@@ -669,7 +677,15 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
         setTooltip({ target: 'email', message: msg });
       }
     } catch (err: any) {
-      const msg = err && err.message ? err.message : 'Signup failed';
+      const baseMsg = err && err.message ? err.message : 'Signup failed';
+      // RN surfaces offline/unreachable hosts as a generic "Network request failed".
+      const msg =
+        /network request failed/i.test(baseMsg) || /failed to fetch/i.test(baseMsg)
+          ? `${baseMsg}\n(${signupUrl})`
+          : baseMsg;
+      if (__DEV__) {
+        console.warn('[signup] network error', baseMsg, 'url=', signupUrl, err);
+      }
       setFieldErrors({ name: false, email: true, password: false, confirmPassword: false });
       setTooltip({ target: 'email', message: msg });
     } finally {

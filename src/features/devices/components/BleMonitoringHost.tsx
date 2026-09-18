@@ -7,11 +7,14 @@ import type { DeviceSummary } from './ScanDeviceCard';
 import { API_BASE_URL } from '../../profiles/api/profileApi';
 import { useBleLiveMonitor } from '../lib/bleLiveMonitor';
 import { useAilinkScaleMonitor } from '../lib/useAilinkScaleMonitor';
+import { useIcomonScaleMonitor } from '../lib/useIcomonScaleMonitor';
 import { subscribeDeviceUpdates } from '../lib/deviceEvents';
 import { isScanModalOpen, subscribeScanModalOpen } from '../lib/deviceScanState';
 import { getActiveProfileId, subscribeActiveProfileId } from '../../profiles/lib/profileEvents';
 import { useProfileConsents } from '../../legal/hooks/useProfileConsents';
 import { isWeightScaleText } from '../../../shared/lib/ailinkScale';
+import { isIcomonBrandText } from '../../../shared/lib/icomonScale';
+import { ensureScanStopped } from '../lib/bleManager';
 
 type Props = {
   enabled: boolean;
@@ -131,6 +134,11 @@ export default function BleMonitoringHost({ enabled }: Props) {
       const wasOpen = prevScanModalOpenRef.current;
       prevScanModalOpenRef.current = nextOpen;
       setScanModalOpenState(nextOpen);
+      if (!wasOpen && nextOpen) {
+        // Modal is opening — release the BLE scan adapter immediately so the
+        // add-device scanner is not stuck waiting on "already scanning".
+        void ensureScanStopped(200);
+      }
       if (wasOpen && !nextOpen) {
         // A single restart after the scan modal closes is sufficient. The
         // previous cascade of [0, 900, 2200] ms caused mid-handshake cancellations
@@ -180,36 +188,66 @@ export default function BleMonitoringHost({ enabled }: Props) {
   // bleLiveMonitor.ts). A second full teardown/restart from here is redundant
   // and can cancel in-flight connections, so no periodic restartKey bump.
 
+  const scaleText = (device: DeviceSummary) =>
+    `${device.device_type || ''} ${device.device_name || ''} ${device.factory_name || ''} ${device.display_name || ''}`;
+
+  // ICOMON scales are frequently factory-renamed (e.g. "MY_SCALE") so their BLE
+  // name carries no "icomon"/"welland" text to match on. AddDeviceModal already
+  // resolves the real vendor at pairing time (via the ICOMON BLE service UUID)
+  // and stores it as `device.platform` — trust that first, and only fall back
+  // to the name heuristic for devices added before `platform` was recorded.
+  const scalePlatform = (device: DeviceSummary): 'icomon' | 'ailink' | null => {
+    const platform = String(device.platform || '').trim().toLowerCase();
+    if (platform === 'icomon') return 'icomon';
+    if (platform === 'ailink') return 'ailink';
+    const text = scaleText(device);
+    if (!isWeightScaleText(text)) return null;
+    return isIcomonBrandText(text) ? 'icomon' : 'ailink';
+  };
+
+  const icomonDevices = useMemo(
+    () => devices.filter((device) => scalePlatform(device) === 'icomon'),
+    [devices],
+  );
+
   const ailinkDevices = useMemo(
-    () =>
-      devices.filter((device) =>
-        isWeightScaleText(
-          `${device.device_type || ''} ${device.device_name || ''} ${device.factory_name || ''} ${device.display_name || ''}`,
-        ),
-      ),
+    () => devices.filter((device) => scalePlatform(device) === 'ailink'),
     [devices],
   );
 
   const bleMonitorDevices = useMemo(
-    () =>
-      devices.filter(
-        (device) =>
-          !isWeightScaleText(
-            `${device.device_type || ''} ${device.device_name || ''} ${device.factory_name || ''} ${device.display_name || ''}`,
-          ),
-      ),
+    () => devices.filter((device) => scalePlatform(device) === null),
     [devices],
   );
+
+  useEffect(() => {
+    console.log(
+      '[SCALE_MON] devices:',
+      devices.map((d) => ({ id: d.device_id, name: d.device_name, platform: d.platform, as: scalePlatform(d) })),
+      'icomonDevices:', icomonDevices.length,
+      'ailinkDevices:', ailinkDevices.length,
+    );
+  }, [devices]);
 
   useBleLiveMonitor({
     active: shouldRunDeviceMonitoring,
     devices: bleMonitorDevices,
     restartKey,
+    // Keep the shared scan running even when there are no non-scale devices to
+    // monitor — the AILink/ICOMON scale monitors below have no scan of their own
+    // and rely entirely on this scan's callback to notice their device advertising.
+    scanForScaleHandoff: icomonDevices.length > 0 || ailinkDevices.length > 0,
   });
 
   useAilinkScaleMonitor({
     active: shouldRunDeviceMonitoring,
     devices: ailinkDevices,
+    activeProfileId,
+  });
+
+  useIcomonScaleMonitor({
+    active: shouldRunDeviceMonitoring,
+    devices: icomonDevices,
     activeProfileId,
   });
 

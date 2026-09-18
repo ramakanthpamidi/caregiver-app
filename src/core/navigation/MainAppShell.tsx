@@ -819,16 +819,13 @@ export default function MainAppShell() {
       }
 
       const token = await AsyncStorage.getItem('authToken');
-      console.log('[gate] token read =', token ? 'present' : 'ABSENT');
       if (!token) {
-        console.warn('[gate] no token → signing out');
         await clearUserSession();
         setIsLoggedIn(false);
         return;
       }
 
       const profiles = await getMyProfiles(token);
-      console.log('[gate] getMyProfiles ok, count =', (profiles as any)?.length);
       await setCachedProfiles(profiles as any);
       setProfileGate(profiles.length > 0 ? 'ready' : 'needs');
     } catch (e: any) {
@@ -849,13 +846,11 @@ export default function MainAppShell() {
       }
 
       if (isAuthError(msg)) {
-        console.warn('[gate] getMyProfiles auth error → signing out:', msg);
         await clearUserSession();
         setIsLoggedIn(false);
         showToast('Session expired. Please log in again.', 'info');
         return;
       }
-      console.warn('[gate] getMyProfiles non-auth error:', msg);
 
       setProfileGate('error');
       setProfileGateError(msg);

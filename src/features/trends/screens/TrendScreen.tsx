@@ -17,6 +17,9 @@ import {
   useActiveTab,
 } from '../../../shared/navigation/tabNavigation';
 import OverallTrendChartCard from '../components/OverallTrendChartCard';
+import WeightBmiTile from '../components/WeightBmiTile';
+import WeightDetailOverlay from '../components/WeightDetailOverlay';
+import { useLatestWeightBmi, evaluateBmi, buildBmiAdviceBody } from '../lib/weightBmi';
 import ScalarTrendCard, { type ScalarTrendPoint } from '../components/ScalarTrendCard';
 import {
   API_BASE_URL,
@@ -34,6 +37,7 @@ import { emitTrendsRefresh, getActiveProfileId, subscribeActiveProfileId, subscr
 import { getCachedGoals, type CachedGoal } from '../../profiles/storage/goalCache';
 import DialogFrame from '../../../shared/components/DialogFrame';
 import { useLiveReadings } from '../../devices/lib/liveReadings';
+import { classifyVitalDeviceKind } from '../../devices/lib/deviceKind';
 import { loadPersistedLiveReadings, savePersistedLiveReadings } from '../../devices/storage/persistedLiveReadings';
 import {
   evaluateBloodPressure,
@@ -44,7 +48,6 @@ import {
   getAlertMessage,
   formatReadingText,
   getDeviceNameForType,
-  getOverallStatus,
   type HealthStatusLevel,
 } from '../../../shared/lib/healthThresholds';
 import { addAlert, healthStatusToSeverity } from '../../alerts/storage/alertStorage';
@@ -133,35 +136,20 @@ function getLatestDeviceId(points: any[] | null | undefined): string | null {
 }
 
 function deviceMatchesManualMetric(metric: DetailMetric, device: any): boolean {
-  const text = String(
-    `${device?.device_type || ''} ${device?.display_name || ''} ${device?.device_name || ''} ${device?.factory_name || ''} ${device?.medical_device_type || ''}`,
-  ).toLowerCase();
+  const kind = classifyVitalDeviceKind({
+    device_type: device?.device_type,
+    device_name: device?.device_name,
+    factory_name: device?.factory_name,
+    display_name: device?.display_name,
+    medical_device_type: device?.medical_device_type,
+    platform: device?.platform,
+  });
 
-  if (metric === 'bp') {
-    return (
-      text.includes('pressure') ||
-      text.includes('blood pressure') ||
-      text.includes('bp')
-    );
-  }
-
-  if (metric === 'glucose') {
-    return text.includes('glucose') || text.includes('blood glucose');
-  }
-
-  if (metric === 'temp') {
-    return (
-      text.includes('thermometer') ||
-      text.includes('temperature') ||
-      text.includes('temp')
-    );
-  }
-
-  return (
-    text.includes('oximeter') ||
-    text.includes('spo2') ||
-    text.includes('o2')
-  );
+  if (metric === 'bp') return kind === 'Pressure';
+  if (metric === 'glucose') return kind === 'Glucose';
+  if (metric === 'temp') return kind === 'Thermometer';
+  if (metric === 'spo2') return kind === 'Oximeter';
+  return false;
 }
 
 function parseInputNumber(raw: string): number | null {
@@ -376,35 +364,6 @@ function levelFromHealthStatus(status: HealthStatusLevel | null): 'critical' | '
   return 'excellent';
 }
 
-function buildOverallBody(status: HealthStatusLevel | null, lang: 'en' | 'th'): string {
-  if (!status) {
-    return lang === 'th'
-      ? 'เชื่อมต่อและซิงค์อุปกรณ์เป็นประจำเพื่อรับภาพรวมสุขภาพที่ครบถ้วนขึ้น'
-      : 'Connect and sync your devices regularly to get a more complete overall health view.';
-  }
-
-  if (status === 'Critical') {
-    return lang === 'th'
-      ? 'มีอย่างน้อยหนึ่งตัวชี้วัดอยู่ในระดับวิกฤต ควรวัดซ้ำและติดตามอาการอย่างใกล้ชิดทันที'
-      : 'At least one metric is critical. Recheck readings and monitor symptoms closely right away.';
-  }
-
-  if (status === 'Warning') {
-    return lang === 'th'
-      ? 'บางตัวชี้วัดอยู่นอกช่วงเป้าหมาย ควรติดตามบ่อยขึ้นและดูแนวโน้มอย่างต่อเนื่อง'
-      : 'Some metrics are outside the target range. Monitor more frequently and keep watching the trend.';
-  }
-
-  if (status === 'Excellent') {
-    return lang === 'th'
-      ? 'ภาพรวมสุขภาพดีมาก รักษากิจวัตรที่ดีและติดตามต่อเนื่องตามปกติ'
-      : 'Your overall health trend is excellent. Keep your healthy routine and continue routine monitoring.';
-  }
-
-  return lang === 'th'
-    ? 'ภาพรวมสุขภาพอยู่ในเกณฑ์ดี ติดตามค่าต่างๆ อย่างสม่ำเสมอเพื่อรักษาความต่อเนื่อง'
-    : 'Your overall health trend is in a good range. Keep tracking regularly to maintain consistency.';
-}
 
 function buildAdviceBody(metric: 'bp' | 'glucose' | 'temp' | 'spo2', status: HealthStatusLevel | null, hasData: boolean, lang: 'en' | 'th' = 'en'): string {
   if (lang === 'th') {
@@ -1338,6 +1297,7 @@ const TrendScreen = React.memo(function TrendScreen() {
   const activeTab = useActiveTab();
   const [detailPeriod, setDetailPeriod] = useState<Period>('Overall');
   const [selectedMetric, setSelectedMetric] = useState<DetailMetric | null>(null);
+  const [weightDetailOpen, setWeightDetailOpen] = useState(false);
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
   const [goals, setGoals] = useState<CachedGoal[]>([]);
   const [latestDeviceByMetric, setLatestDeviceByMetric] = useState<LatestDeviceByMetric>({
@@ -1390,7 +1350,10 @@ const TrendScreen = React.memo(function TrendScreen() {
     if (activeTab !== 'Trends' && selectedMetric) {
       closeMetricDetail();
     }
-  }, [activeTab, closeMetricDetail, selectedMetric]);
+    if (activeTab !== 'Trends' && weightDetailOpen) {
+      setWeightDetailOpen(false);
+    }
+  }, [activeTab, closeMetricDetail, selectedMetric, weightDetailOpen]);
 
   // Persisted fallbacks — shown when in-memory live readings are empty (e.g. after restart)
   const [persistedTempC, setPersistedTempC] = useState<number | null>(null);
@@ -1550,8 +1513,8 @@ const TrendScreen = React.memo(function TrendScreen() {
       const temp = readingSet?.temp;
       if (
         temp?.values &&
-        typeof temp.values.c === 'number' &&
-        temp.values.c > 0 &&
+        (typeof temp.values.c === 'number' || typeof temp.values.celsius === 'number') &&
+        Number(temp.values.c ?? temp.values.celsius) > 0 &&
         Number(temp.ts) > 0
       ) {
         const tsMs = Number(temp.ts);
@@ -1560,7 +1523,7 @@ const TrendScreen = React.memo(function TrendScreen() {
           latestTemp = {
             ts: new Date(tsMs).toISOString(),
             ts_ms: tsMs,
-            celsius: Number(temp.values.c),
+            celsius: Number(temp.values.c ?? temp.values.celsius),
           };
         }
       }
@@ -1813,10 +1776,10 @@ const TrendScreen = React.memo(function TrendScreen() {
     for (const readingSet of liveReadings.values()) {
       const temp = readingSet?.temp;
       const spo2 = readingSet?.spo2;
-      if (temp?.values && typeof temp.values.c === 'number' && temp.values.c > 0) {
+      if (temp?.values && Number(temp.values.c ?? temp.values.celsius) > 0) {
         const ts = Number(temp.ts || 0);
         if (ts > persistedTempTs) {
-          const newTempC = Number(temp.values.c);
+          const newTempC = Number(temp.values.c ?? temp.values.celsius);
           setPersistedTempC(newTempC);
           setPersistedTempTs(ts);
           savePersistedLiveReadings(activeProfileId, { tempC: newTempC, tempTs: ts }).catch(() => undefined);
@@ -1846,11 +1809,11 @@ const TrendScreen = React.memo(function TrendScreen() {
 
     for (const readingSet of liveReadings.values()) {
       const tempReading = readingSet?.temp;
-      if (tempReading?.values && typeof tempReading.values.c === 'number' && tempReading.values.c > 0) {
+      if (tempReading?.values && Number(tempReading.values.c ?? tempReading.values.celsius) > 0) {
         const ts = Number(tempReading.ts || 0);
         if (ts >= tempTs) {
           tempTs = ts;
-          tempC = tempReading.values.c;
+          tempC = Number(tempReading.values.c ?? tempReading.values.celsius);
         }
       }
       const spo2Reading = readingSet?.spo2;
@@ -1903,81 +1866,74 @@ const TrendScreen = React.memo(function TrendScreen() {
     [detailSpo2Points]
   );
 
+  // Latest weight/BMI (fetched once) — feeds both the Weight & BMI tile and its
+  // Health Advice row.
+  const latestWeightBmi = useLatestWeightBmi(activeProfileId);
+
   const adviceRows = useMemo<AdviceRowModel[]>(() => {
     const bpPalette = advicePalette(levelFromHealthStatus(bpStatus));
     const glucosePalette = advicePalette(levelFromHealthStatus(glucoseStatus));
     const tempPalette = advicePalette(levelFromHealthStatus(tempStatus));
     const spo2Palette = advicePalette(levelFromHealthStatus(spo2Status));
 
-    const validStatuses = [bpStatus, glucoseStatus, tempStatus, spo2Status].filter((s): s is HealthStatusLevel => !!s);
-    const overallStatus = validStatuses.length > 0 ? getOverallStatus(validStatuses) : null;
-    const overallPalette = advicePalette(levelFromHealthStatus(overallStatus));
+    const bmi = latestWeightBmi?.bmi ?? null;
+    const bmiStatus = bmi != null ? evaluateBmi(bmi) : null;
+    const bmiPalette = advicePalette(levelFromHealthStatus(bmiStatus));
 
-    const overallBody = buildOverallBody(overallStatus, lang);
-
-    const rows: AdviceRowModel[] = [
+    // One advice row per overview metric, always shown (with a "no reading"
+    // prompt when data is missing) so the section mirrors the metric grid.
+    return [
       {
-        key: 'overall-advice',
-        icon: require('../../../../assets/android-res/drawable/rhythm.png'),
-        tint: overallPalette.tint,
-        background: overallPalette.background,
-        title: t(lang, 'overall_health'),
-        body: overallBody,
-      },
-    ];
-
-    if (bpStatus != null) {
-      rows.push({
         key: 'bp-advice',
         icon: require('../../../../assets/android-res/drawable/pressure.png'),
         tint: bpPalette.tint,
         background: bpPalette.background,
         title: t(lang, 'blood_pressure'),
-        body: buildAdviceBody('bp', bpStatus, true, lang),
-      });
-    }
-
-    if (glucoseStatus != null) {
-      rows.push({
+        body: buildAdviceBody('bp', bpStatus, latestBpPoint != null, lang),
+      },
+      {
         key: 'glucose-advice',
         icon: require('../../../../assets/android-res/drawable/glucose.png'),
         tint: glucosePalette.tint,
         background: glucosePalette.background,
-        title: t(lang, 'blood_sugar'),
-        body: buildAdviceBody('glucose', glucoseStatus, true, lang),
-      });
-    }
-
-    if (latestAvailableTempC != null) {
-      rows.push({
+        title: t(lang, 'blood_glucose'),
+        body: buildAdviceBody('glucose', glucoseStatus, latestGlucosePoint != null, lang),
+      },
+      {
         key: 'temp-advice',
         icon: require('../../../../assets/android-res/drawable/temperature.png'),
         tint: tempPalette.tint,
         background: tempPalette.background,
         title: t(lang, 'temperature'),
-        body: buildAdviceBody('temp', tempStatus, true, lang),
-      });
-    }
-
-    if (latestAvailableSpo2 != null) {
-      rows.push({
+        body: buildAdviceBody('temp', tempStatus, latestAvailableTempC != null, lang),
+      },
+      {
         key: 'spo2-advice',
         icon: require('../../../../assets/android-res/drawable/spo2.png'),
         tint: spo2Palette.tint,
         background: spo2Palette.background,
         title: t(lang, 'oxygen_level'),
-        body: buildAdviceBody('spo2', spo2Status, true, lang),
-      });
-    }
-
-    return rows;
+        body: buildAdviceBody('spo2', spo2Status, latestAvailableSpo2 != null, lang),
+      },
+      {
+        key: 'weight-advice',
+        icon: require('../../../../assets/android-res/drawable/weight.png'),
+        tint: bmiPalette.tint,
+        background: bmiPalette.background,
+        title: t(lang, 'weight_bmi_trend_title'),
+        body: buildBmiAdviceBody(bmi, lang),
+      },
+    ];
   }, [
     bpStatus,
     glucoseStatus,
     tempStatus,
     spo2Status,
+    latestBpPoint,
+    latestGlucosePoint,
     latestAvailableTempC,
     latestAvailableSpo2,
+    latestWeightBmi,
     lang,
   ]);
 
@@ -2537,6 +2493,14 @@ const TrendScreen = React.memo(function TrendScreen() {
                   ))}
                 </View>
               ))}
+
+              {/* Full-width Weight & Body Composition card below the four device
+                  metrics. */}
+              <View style={[styles.metricRow, styles.metricRowLast, { marginTop: Spacing.md }]}>
+                <View style={styles.metricTileWrap}>
+                  <WeightBmiTile latest={latestWeightBmi} onPress={() => setWeightDetailOpen(true)} />
+                </View>
+              </View>
             </View>
 
             <View style={styles.summarySection}>
@@ -2628,6 +2592,12 @@ const TrendScreen = React.memo(function TrendScreen() {
           </SafeAreaView>
         </Animated.View>
       ) : null}
+      <WeightDetailOverlay
+        visible={weightDetailOpen}
+        onClose={() => setWeightDetailOpen(false)}
+        profileId={activeProfileId}
+        latest={latestWeightBmi}
+      />
       <DialogFrame
         visible={manualMetric != null}
         onRequestClose={closeManualEntry}

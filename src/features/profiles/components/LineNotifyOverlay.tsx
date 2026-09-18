@@ -13,7 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import { DefaultTheme, NavigationContainer, NavigationIndependentTree } from '@react-navigation/native';
 import { HeaderBackButton } from '@react-navigation/elements';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -219,6 +219,7 @@ export default function LineNotifyOverlay({ visible, profileId, onClose }: LineN
   return (
     <View style={styles.absContainer} pointerEvents="box-none">
       <Animated.View style={[styles.container, { transform: [{ translateY }] }]}>
+        <NavigationIndependentTree>
         <NavigationContainer theme={DefaultTheme}>
           <SafeAreaView style={styles.safeArea} edges={['bottom', 'left', 'right']}>
             {/* Header with LINE branding */}
@@ -313,6 +314,7 @@ export default function LineNotifyOverlay({ visible, profileId, onClose }: LineN
             )}
           </SafeAreaView>
         </NavigationContainer>
+        </NavigationIndependentTree>
       </Animated.View>
     </View>
   );

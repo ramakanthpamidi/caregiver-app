@@ -26,10 +26,11 @@ import { emitDeviceUpdates } from '../lib/deviceEvents';
 import { isOnline } from '../../../shared/sync/networkSync';
 import { enqueueAddDevice } from '../../../shared/sync/syncOutbox';
 import { resolveYuwellModel } from '../storage/yuwellModelCache';
+import { inferDisplayName, inferMedicalDeviceTypeLabel } from '../lib/deviceKind';
 import { useLanguage } from '../../../shared/i18n/LanguageContext';
 import { t } from '../../../shared/i18n';
 import { setScanModalOpen } from '../lib/deviceScanState';
-import { bleManager as manager } from '../lib/bleManager';
+import { bleManager as manager, ensureScanStopped } from '../lib/bleManager';
 
 type Props = {
   visible: boolean;
@@ -70,8 +71,23 @@ function isAilinkDevice(device: BleDevice): boolean {
   return name.includes('ailink');
 }
 
+// ICOMON scales are typically factory-renamed (e.g. "MY_SCALE") so the BLE
+// name alone isn't reliable — match by their advertised proprietary service
+// UUID first, falling back to a name check for future/differently-named units.
+const ICOMON_SERVICE_UUID = '0000ffb0-0000-1000-8000-00805f9b34fb';
+
+function isIcomonDevice(device: BleDevice): boolean {
+  const uuids = (device.serviceUUIDs || []).map((u) => String(u).toLowerCase());
+  if (uuids.includes(ICOMON_SERVICE_UUID)) return true;
+  const name = getBleName(device).toLowerCase();
+  // "MY_SCALE" (with underscore/space/hyphen or none) is this vendor's generic
+  // factory-renamed advertising name — recognize it even when the scan result
+  // doesn't carry the service UUID (advertisement vs. scan-response packet).
+  return name.includes('icomon') || name.includes('welland') || /my[\s_-]?scale/.test(name);
+}
+
 function isSupportedDevice(device: BleDevice): boolean {
-  return isYuwellDevice(device) || isAilinkDevice(device);
+  return isYuwellDevice(device) || isAilinkDevice(device) || isIcomonDevice(device);
 }
 
 function useRadarRotation(active: boolean) {
@@ -178,6 +194,7 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
   const navVisualIdRef = useRef(`add-device-modal-nav-${Math.random().toString(36).slice(2)}`);
 
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, FoundDevice>>({});
   const [addingDeviceId, setAddingDeviceId] = useState<string | null>(null);
   const [existingDeviceIds, setExistingDeviceIds] = useState<Set<string>>(new Set());
@@ -187,7 +204,11 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
   const foundBufferRef = useRef<Record<string, FoundDevice>>({});
   const flushIntervalRef = useRef<number | null>(null);
   const pruneIntervalRef = useRef<number | null>(null);
+  const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveInFlightRef = useRef<Set<string>>(new Set());
+  // Bumps on every start/stop so stale scan callbacks cannot revive a finished session.
+  const scanGenerationRef = useRef(0);
+  const SCAN_DURATION_MS = 25_000;
 
   useEffect(() => {
     const listenerId = navProgress.addListener(({ value }) => {
@@ -205,15 +226,7 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
     foundRef.current = found;
   }, [found]);
 
-  const stopScan = useCallback(() => {
-    try {
-      // stopDeviceScan returns a Promise in react-native-ble-plx; swallow rejections to avoid unhandled promise warnings
-      Promise.resolve(manager.stopDeviceScan()).catch(() => {});
-    } catch {
-      // ignore
-    }
-    setScanning(false);
-    // flush buffered devices once and clear interval
+  const clearScanTimers = useCallback(() => {
     if (flushIntervalRef.current) {
       try {
         clearInterval(flushIntervalRef.current as any);
@@ -226,12 +239,29 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
       } catch {}
       pruneIntervalRef.current = null;
     }
+    if (scanTimeoutRef.current) {
+      clearTimeout(scanTimeoutRef.current);
+      scanTimeoutRef.current = null;
+    }
+  }, []);
+
+  const stopScan = useCallback(() => {
+    // Invalidate in-flight startScan / discovery callbacks.
+    scanGenerationRef.current += 1;
+    try {
+      // stopDeviceScan returns a Promise in react-native-ble-plx; swallow rejections
+      Promise.resolve(manager.stopDeviceScan()).catch(() => {});
+    } catch {
+      // ignore
+    }
+    setScanning(false);
+    clearScanTimers();
     // final flush: merge remaining buffered entries into state and clear buffer
     if (Object.keys(foundBufferRef.current).length) {
       setFound((prev) => ({ ...prev, ...foundBufferRef.current }));
       foundBufferRef.current = {};
     }
-  }, []);
+  }, [clearScanTimers]);
 
   const loadExistingDevices = useCallback(async () => {
     try {
@@ -247,7 +277,8 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
       const list = Array.isArray(json?.devices) ? json.devices : [];
       const ids = new Set<string>();
       for (const d of list) {
-        const id = String(d?.device_id || '').trim();
+        // Normalize MAC / BLE id casing so "already added" matches scan results.
+        const id = String(d?.device_id || '').trim().toUpperCase();
         if (id) ids.add(id);
       }
       setExistingDeviceIds(ids);
@@ -260,175 +291,287 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
     if (Platform.OS !== 'android') return true;
 
     try {
-      const result = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-      ]);
+      const apiLevel =
+        typeof Platform.Version === 'number'
+          ? Platform.Version
+          : parseInt(String(Platform.Version), 10) || 0;
 
-      const ok = Object.values(result).every((v) => v === PermissionsAndroid.RESULTS.GRANTED);
-      return ok;
+      // Android 12+ (API 31): BLUETOOTH_SCAN / CONNECT. Older: location only.
+      const permissions =
+        apiLevel >= 31
+          ? [
+              PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+              PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+              PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+            ]
+          : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+
+      const result = await PermissionsAndroid.requestMultiple(permissions as any);
+      // Only require permissions that were actually requested and are defined.
+      return Object.entries(result).every(([, v]) => v === PermissionsAndroid.RESULTS.GRANTED);
     } catch {
       return false;
     }
   }, []);
 
   const startScan = useCallback(async () => {
+    // New generation cancels any previous async start still waiting on permissions/BT.
+    const generation = ++scanGenerationRef.current;
+    setScanError(null);
+
+    const stillActive = () => generation === scanGenerationRef.current;
+
     const ok = await requestPermissions();
+    if (!stillActive()) return;
     if (!ok) {
       setScanning(false);
+      setScanError(t(lang, 'scan_permission_denied'));
+      showToast(t(lang, 'scan_permission_denied'), 'error');
       return;
     }
 
     // Check if Bluetooth is powered on before scanning
     try {
       const bleState = await manager.state();
+      if (!stillActive()) return;
       if (bleState !== BleState.PoweredOn) {
-        // Wait for user to enable Bluetooth
-        await new Promise<void>((resolve, reject) => {
-          const sub = manager.onStateChange((newState: string) => {
-            if (newState === BleState.PoweredOn) {
-              sub.remove();
-              resolve();
-            }
-          }, false);
-          Alert.alert(
-            t(lang, 'bluetooth_off_title'),
-            t(lang, 'bluetooth_off_message'),
-            [
+        try {
+          await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            let sub: { remove?: () => void } | null = null;
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            const finish = (fn: () => void) => {
+              if (settled) return;
+              settled = true;
+              try {
+                sub?.remove?.();
+              } catch {}
+              if (timer) clearTimeout(timer);
+              fn();
+            };
+            sub = manager.onStateChange((newState: string) => {
+              if (newState === BleState.PoweredOn) {
+                finish(() => resolve());
+              }
+            }, true);
+            Alert.alert(t(lang, 'bluetooth_off_title'), t(lang, 'bluetooth_off_message'), [
               {
                 text: 'OK',
                 onPress: () => {
-                  // On Android, try to enable Bluetooth via system prompt
                   if (Platform.OS === 'android') {
                     try {
-                        Promise.resolve(manager.enable()).catch(() => {});
+                      Promise.resolve(manager.enable()).catch(() => {});
                     } catch {}
                   }
                 },
               },
-            ],
-          );
-          // Timeout after 30 seconds so we don't hang forever
-          setTimeout(() => { sub.remove(); reject(new Error('timeout')); }, 30000);
-        });
+            ]);
+            // Don't hang the modal forever waiting for BT.
+            timer = setTimeout(() => {
+              finish(() => reject(new Error('timeout')));
+            }, 12_000);
+          });
+        } catch {
+          if (!stillActive()) return;
+          setScanning(false);
+          setScanError(t(lang, 'bluetooth_off_message'));
+          showToast(t(lang, 'bluetooth_off_message'), 'error');
+          return;
+        }
       }
     } catch {
-      // If state check fails or times out, still attempt the scan
+      // If state check fails, still attempt the scan below.
     }
+
+    if (!stillActive()) return;
+
+    // Live monitor may still own the adapter for a beat after the modal opens —
+    // force-stop any existing scan and settle before starting ours.
+    await ensureScanStopped(350);
+    if (!stillActive()) return;
+
     // clear buffers and start scanning; buffer discoveries then flush at intervals
     foundBufferRef.current = {};
     setFound({});
     setScanning(true);
+    clearScanTimers();
 
-    // prune devices that haven't been seen recently
-    const staleAfterMs = 7000;
-    if (!pruneIntervalRef.current) {
-      pruneIntervalRef.current = (setInterval(() => {
-        const now = Date.now();
-        setFound((prev) => {
-          let changed = false;
-          const next: Record<string, FoundDevice> = {};
-          for (const [id, d] of Object.entries(prev)) {
-            if (now - (d.lastSeen || 0) <= staleAfterMs) {
-              next[id] = d;
-            } else {
-              changed = true;
-            }
+    // Keep recently seen devices longer so the list doesn't flicker empty mid-scan.
+    const staleAfterMs = 20_000;
+    pruneIntervalRef.current = setInterval(() => {
+      const now = Date.now();
+      setFound((prev) => {
+        let changed = false;
+        const next: Record<string, FoundDevice> = {};
+        for (const [id, d] of Object.entries(prev)) {
+          if (now - (d.lastSeen || 0) <= staleAfterMs) {
+            next[id] = d;
+          } else {
+            changed = true;
           }
-          return changed ? next : prev;
-        });
-      }, 1000) as unknown) as number;
-    }
-
-    // flush buffered discoveries into state every 500ms to reduce churn
-    if (!flushIntervalRef.current) {
-      flushIntervalRef.current = (setInterval(() => {
-        const buffer = foundBufferRef.current;
-        const keys = Object.keys(buffer);
-        if (keys.length) {
-          // merge buffer into state, overwriting entries so server-resolved names update icons
-          setFound((prev) => ({ ...prev, ...buffer }));
-          // clear buffer (we've moved buffered entries into React state)
-          foundBufferRef.current = {};
         }
-      }, 500) as unknown) as number;
-    }
+        return changed ? next : prev;
+      });
+    }, 1000) as unknown as number;
 
-    try {
-      // startDeviceScan returns a Promise in react-native-ble-plx; swallow rejections to avoid unhandled promise warnings
-      Promise.resolve(
-        manager.startDeviceScan(null, null, (error: Error | null, device: BleDevice | null) => {
-          if (error) {
-            setScanning(false);
-            return;
-          }
+    // flush buffered discoveries into state every 400ms to reduce churn
+    flushIntervalRef.current = setInterval(() => {
+      const buffer = foundBufferRef.current;
+      if (Object.keys(buffer).length) {
+        setFound((prev) => ({ ...prev, ...buffer }));
+        foundBufferRef.current = {};
+      }
+    }, 400) as unknown as number;
 
-          if (!device) return;
-          if (!isSupportedDevice(device)) return;
+    // Auto-stop so the UI cannot spin forever ("scan stuck").
+    scanTimeoutRef.current = setTimeout(() => {
+      if (!stillActive()) return;
+      console.log('[ADD_DEVICE] scan auto-stop after', SCAN_DURATION_MS, 'ms');
+      try {
+        Promise.resolve(manager.stopDeviceScan()).catch(() => {});
+      } catch {}
+      setScanning(false);
+      clearScanTimers();
+      if (Object.keys(foundBufferRef.current).length) {
+        setFound((prev) => ({ ...prev, ...foundBufferRef.current }));
+        foundBufferRef.current = {};
+      }
+    }, SCAN_DURATION_MS);
 
-          const bleName = getBleName(device);
-          if (!bleName) return;
+    const onDeviceFound = (error: Error | null, device: BleDevice | null) => {
+      if (!stillActive()) return;
 
-          const now = Date.now();
-          const existing = foundRef.current[device.id] || foundBufferRef.current[device.id];
-          const nextEntry: FoundDevice = {
-            id: device.id,
-            device,
-            bleName,
-            displayName: existing?.displayName,
-            factoryName: existing?.factoryName,
-            lastSeen: now,
-          };
-          foundBufferRef.current[device.id] = nextEntry;
-
-          // If we already resolved model info for this device id, don't re-resolve.
-          if (nextEntry.displayName) return;
-
-          // AILink devices don't need server-side model resolution.
-          if (isAilinkDevice(device)) {
-            foundBufferRef.current[device.id] = {
-              ...nextEntry,
-              displayName: 'Weight Scale',
-              factoryName: 'AILink Weight Scale',
-            };
-            return;
-          }
-
-          // Avoid spamming resolves; use BLE name as the key.
-          if (resolveInFlightRef.current.has(bleName)) return;
-          resolveInFlightRef.current.add(bleName);
-
-          // Resolve model info from cache first, then server fallback.
-          (async () => {
+      if (error) {
+        const msg = String((error as any)?.message || error || '');
+        console.log('[ADD_DEVICE] scan error:', msg);
+        // Recoverable "already scanning" — stop and retry once.
+        if (/already|cannot start scanning/i.test(msg)) {
+          void (async () => {
+            await ensureScanStopped(400);
+            if (!stillActive()) return;
             try {
-              const model = await resolveYuwellModel(bleName);
-              const displayName = model?.display_name || null;
-              const factoryName = model?.factory_name || null;
-
-              if (displayName || factoryName) {
-                const current = foundRef.current[device.id] || foundBufferRef.current[device.id];
-                if (!current) return;
-                foundBufferRef.current[device.id] = {
-                  ...current,
-                  displayName: displayName || current.displayName,
-                  factoryName: factoryName || current.factoryName,
-                };
-              }
-            } catch {
-              // ignore network errors
-            } finally {
-              resolveInFlightRef.current.delete(bleName);
+              manager.startDeviceScan(null, { allowDuplicates: true }, onDeviceFound);
+            } catch (e: any) {
+              setScanning(false);
+              setScanError(e?.message || t(lang, 'scan_failed'));
             }
           })();
-        })
-      ).catch(() => {
+          return;
+        }
         setScanning(false);
+        clearScanTimers();
+        setScanError(msg || t(lang, 'scan_failed'));
+        return;
+      }
+
+      if (!device) return;
+      if (!isSupportedDevice(device)) return;
+
+      const bleName = getBleName(device);
+      if (!bleName) return;
+
+      const now = Date.now();
+      const existing = foundRef.current[device.id] || foundBufferRef.current[device.id];
+
+      // Immediate local type label so tiles are useful even when the model API is slow/offline.
+      const heuristicPlatform = isAilinkDevice(device)
+        ? 'AILink'
+        : isIcomonDevice(device)
+          ? 'ICOMON'
+          : 'Yuwell';
+      const heuristicType = inferMedicalDeviceTypeLabel({
+        device_name: bleName,
+        factory_name: bleName,
+        platform: heuristicPlatform,
       });
-    } catch {
-      setScanning(false);
+      const heuristicDisplay =
+        inferDisplayName({
+          device_name: bleName,
+          factory_name: bleName,
+          medical_device_type: heuristicType,
+          platform: heuristicPlatform,
+        }) || undefined;
+
+      const nextEntry: FoundDevice = {
+        id: device.id,
+        device,
+        bleName,
+        displayName: existing?.displayName || heuristicDisplay,
+        factoryName: existing?.factoryName || bleName,
+        lastSeen: now,
+      };
+      foundBufferRef.current[device.id] = nextEntry;
+
+      // AILink devices don't need server-side model resolution.
+      if (isAilinkDevice(device)) {
+        foundBufferRef.current[device.id] = {
+          ...nextEntry,
+          displayName: 'Weight Scale',
+          factoryName: 'AILink Weight Scale',
+        };
+        return;
+      }
+
+      // Same for ICOMON scales — their (often factory-renamed) BLE name isn't
+      // a useful catalog lookup key, and the native module handles the
+      // proprietary protocol regardless of what the device is called.
+      if (isIcomonDevice(device)) {
+        foundBufferRef.current[device.id] = {
+          ...nextEntry,
+          displayName: 'Weight Scale',
+          factoryName: 'ICOMON Weight Scale',
+        };
+        return;
+      }
+
+      // Already have a catalog/heuristic name — optional upgrade via cache only.
+      if (existing?.displayName && existing.displayName !== heuristicDisplay) return;
+
+      if (resolveInFlightRef.current.has(bleName)) return;
+      resolveInFlightRef.current.add(bleName);
+
+      (async () => {
+        try {
+          const model = await resolveYuwellModel(bleName);
+          if (!stillActive()) return;
+          const displayName = model?.display_name || null;
+          const factoryName = model?.factory_name || null;
+          if (displayName || factoryName) {
+            const current = foundRef.current[device.id] || foundBufferRef.current[device.id];
+            if (!current) return;
+            foundBufferRef.current[device.id] = {
+              ...current,
+              displayName: displayName || current.displayName,
+              factoryName: factoryName || current.factoryName,
+            };
+          }
+        } catch {
+          // ignore network errors — heuristic name already applied
+        } finally {
+          resolveInFlightRef.current.delete(bleName);
+        }
+      })();
+    };
+
+    try {
+      manager.startDeviceScan(null, { allowDuplicates: true }, onDeviceFound);
+    } catch (e: any) {
+      if (!stillActive()) return;
+      console.log('[ADD_DEVICE] startDeviceScan threw:', e?.message || e);
+      // One recovery path: stop whatever owns the adapter, then retry.
+      try {
+        await ensureScanStopped(500);
+        if (!stillActive()) return;
+        manager.startDeviceScan(null, { allowDuplicates: true }, onDeviceFound);
+      } catch (e2: any) {
+        if (!stillActive()) return;
+        setScanning(false);
+        clearScanTimers();
+        setScanError(e2?.message || e?.message || t(lang, 'scan_failed'));
+        showToast(t(lang, 'scan_failed'), 'error');
+      }
     }
-  }, [lang, requestPermissions]);
+  }, [SCAN_DURATION_MS, clearScanTimers, lang, requestPermissions]);
 
   const doClose = useCallback(
     (callOnRequest = true) => {
@@ -471,7 +614,9 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
   // without the 300-700ms Android onShow delay.
   useEffect(() => {
     if (visible && !mounted) {
+      // Signal live monitor to release the BLE adapter BEFORE we start scanning.
       setScanModalOpen(true);
+      setScanError(null);
       // Reset animation values BEFORE mounting to prevent flash
       fadeAnim.setValue(0);
       backdrop.setValue(0);
@@ -504,7 +649,15 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
               useNativeDriver: false,
             }),
           ]).start(() => {
-            if (!cancelled) startScan();
+            // Give BleMonitoringHost time to tear down its scan before we claim the adapter.
+            if (cancelled) return;
+            const delay = setTimeout(() => {
+              if (!cancelled) void startScan();
+            }, 450);
+            openAnimRef.current = () => {
+              cancelled = true;
+              clearTimeout(delay);
+            };
           });
         });
         if (cancelled) cancelAnimationFrame(id2);
@@ -532,7 +685,15 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
   const addDevice = useCallback(
     async (item: FoundDevice) => {
       if (addingDeviceId) return;
-      if (existingDeviceIds.has(item.id) || addedDeviceIds.has(item.id)) return;
+      const idKey = String(item.id || '').trim().toUpperCase();
+      if (
+        existingDeviceIds.has(idKey) ||
+        existingDeviceIds.has(item.id) ||
+        addedDeviceIds.has(item.id) ||
+        addedDeviceIds.has(idKey)
+      ) {
+        return;
+      }
       setAddingDeviceId(item.id);
 
       try {
@@ -542,14 +703,33 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
           return;
         }
 
+        const inferredType =
+          item.displayName ||
+          inferMedicalDeviceTypeLabel({
+            device_name: item.bleName,
+            factory_name: item.factoryName || item.bleName,
+            display_name: item.displayName,
+            platform: isAilinkDevice(item.device) ? 'AILink' : isIcomonDevice(item.device) ? 'ICOMON' : 'Yuwell',
+          });
+        const inferredDisplay =
+          item.displayName ||
+          inferDisplayName({
+            device_name: item.bleName,
+            factory_name: item.factoryName || item.bleName,
+            display_name: item.displayName,
+            medical_device_type: inferredType,
+            platform: isAilinkDevice(item.device) ? 'AILink' : isIcomonDevice(item.device) ? 'ICOMON' : 'Yuwell',
+          });
         const body = {
           device_id: item.device?.id,
           device_name: item.bleName,
           factory_name: item.factoryName || item.bleName,
           device_type: 'Medical',
-          medical_device_type: item.displayName || undefined,
+          // Prefer catalog display name; fall back to model-code heuristics (BO-YX* → Oximeter)
+          medical_device_type: inferredType || undefined,
+          display_name: inferredDisplay || undefined,
           comm_protocol: 'BLE',
-          platform: isAilinkDevice(item.device) ? 'AILink' : 'Yuwell',
+          platform: isAilinkDevice(item.device) ? 'AILink' : isIcomonDevice(item.device) ? 'ICOMON' : 'Yuwell',
           ble_id: item.id, // Track local BLE ID for matching
         };
 
@@ -594,12 +774,20 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
           const msg = data?.error || data?.message || `Failed to add device (status ${resp.status})`;
           const lowerMsg = String(msg || '').toLowerCase();
           if (resp.status === 409 || lowerMsg.includes('already')) {
+            // Already registered — still refresh list so the UI shows it.
             showToast('Device already added', 'info');
             setAddedDeviceIds((prev) => {
               const next = new Set(prev);
               next.add(item.id);
               return next;
             });
+            const existingRef = Number(data?.device_ref ?? data?.device?.id);
+            try {
+              onDeviceAdded?.(Number.isFinite(existingRef) ? existingRef : -1);
+            } catch {}
+            try {
+              emitDeviceUpdates();
+            } catch {}
             return;
           }
           // If request failed (possibly network issue), queue for later
@@ -623,37 +811,49 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
           return;
         }
 
-        const deviceRef = Number(data?.device_ref);
-        if (Number.isFinite(deviceRef)) {
-          showToast('Device added', 'success');
-          setAddedDeviceIds((prev) => {
-            const next = new Set(prev);
-            next.add(item.id);
-            return next;
-          });
-          try {
-            onDeviceAdded?.(deviceRef);
-          } catch {
-            // ignore callback errors
-          }
-          // Notify global subscribers that devices updated so other screens can refresh
-          try {
-            emitDeviceUpdates();
-          } catch {}
-          return;
+        // Backend returns { device: { id, ... } }; older clients expected top-level device_ref.
+        const deviceRef = Number(data?.device_ref ?? data?.device?.id ?? data?.device?.device_ref);
+        showToast('Device added', 'success');
+        setAddedDeviceIds((prev) => {
+          const next = new Set(prev);
+          next.add(item.id);
+          return next;
+        });
+        try {
+          onDeviceAdded?.(Number.isFinite(deviceRef) ? deviceRef : -1);
+        } catch {
+          // ignore callback errors
         }
-
-        showToast('Device added (missing device_ref)', 'info');
+        // Notify global subscribers that devices updated so other screens can refresh
+        try {
+          emitDeviceUpdates();
+        } catch {}
       } catch (e: any) {
         // Network error - queue for offline sync
+        const inferredType =
+          item.displayName ||
+          inferMedicalDeviceTypeLabel({
+            device_name: item.bleName,
+            factory_name: item.factoryName || item.bleName,
+            display_name: item.displayName,
+            platform: isAilinkDevice(item.device) ? 'AILink' : isIcomonDevice(item.device) ? 'ICOMON' : 'Yuwell',
+          });
         const body = {
           device_id: item.device?.id,
           device_name: item.bleName,
           factory_name: item.factoryName || item.bleName,
           device_type: 'Medical',
-          medical_device_type: item.displayName || undefined,
+          medical_device_type: inferredType || undefined,
+          display_name:
+            item.displayName ||
+            inferDisplayName({
+              device_name: item.bleName,
+              factory_name: item.factoryName || item.bleName,
+              medical_device_type: inferredType,
+            }) ||
+            undefined,
           comm_protocol: 'BLE',
-          platform: isAilinkDevice(item.device) ? 'AILink' : 'Yuwell',
+          platform: isAilinkDevice(item.device) ? 'AILink' : isIcomonDevice(item.device) ? 'ICOMON' : 'Yuwell',
           ble_id: item.id,
         };
         try {
@@ -700,21 +900,48 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
 
         <Animated.View style={[styles.sheet, { height: sheetHeight, opacity: fadeAnim, transform: [{ translateY: fadeAnim.interpolate({ inputRange: [0, 1], outputRange: [screenH, 0] }) }] }]}>
           <View style={styles.headerRow}>
-            <Text style={styles.title}>{t(lang, 'modal_scanning')}</Text>
-            <Pressable onPress={() => doClose(true)} hitSlop={10}>
-              <Text style={styles.closeText}>{t(lang, 'close')}</Text>
-            </Pressable>
+            <Text style={styles.title}>
+              {scanning ? t(lang, 'modal_scanning') : t(lang, 'modal_scan_idle')}
+            </Text>
+            <View style={styles.headerActions}>
+              {!scanning ? (
+                <Pressable
+                  onPress={() => {
+                    void startScan();
+                  }}
+                  hitSlop={10}
+                  style={styles.rescanBtn}
+                >
+                  <Text style={styles.rescanText}>{t(lang, 'start_scan')}</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  onPress={() => stopScan()}
+                  hitSlop={10}
+                  style={styles.rescanBtn}
+                >
+                  <Text style={styles.rescanText}>{t(lang, 'modal_stop_scan')}</Text>
+                </Pressable>
+              )}
+              <Pressable onPress={() => doClose(true)} hitSlop={10}>
+                <Text style={styles.closeText}>{t(lang, 'close')}</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={styles.radarSection}>
             <RadarScanner active={scanning} />
+            {scanError ? <Text style={styles.scanErrorText}>{scanError}</Text> : null}
           </View>
 
           <View style={styles.divider} />
 
           <View style={styles.devicesSection}>
             <View style={styles.devicesHeader}>
-              <Text style={styles.devicesTitle}>{t(lang, 'modal_found')}</Text>
+              <Text style={styles.devicesTitle}>
+                {t(lang, 'modal_found')}
+                {foundList.length > 0 ? ` (${foundList.length})` : ''}
+              </Text>
             </View>
 
             <FlatList
@@ -728,11 +955,18 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
               ]}
               showsVerticalScrollIndicator={false}
               ListEmptyComponent={() => (
-                <Text style={styles.emptyText}>{t(lang, 'modal_no_devices')}</Text>
+                <Text style={styles.emptyText}>
+                  {scanning ? t(lang, 'modal_searching') : t(lang, 'modal_no_devices')}
+                </Text>
               )}
               renderItem={({ item, index }) => (
                 (() => {
-                  const isAdded = existingDeviceIds.has(item.id) || addedDeviceIds.has(item.id);
+                  const idKey = String(item.id || '').trim().toUpperCase();
+                  const isAdded =
+                    existingDeviceIds.has(idKey) ||
+                    existingDeviceIds.has(item.id) ||
+                    addedDeviceIds.has(item.id) ||
+                    addedDeviceIds.has(idKey);
                   const isAdding = addingDeviceId === item.id;
                   return (
                 <Pressable
@@ -804,8 +1038,18 @@ const styles = StyleSheet.create({
     zIndex: 1001,
   },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  title: { fontSize: 18, fontWeight: '700' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  title: { fontSize: 18, fontWeight: '700', flexShrink: 1, paddingRight: 8 },
   closeText: { color: '#2b9cd3', fontWeight: '700' },
+  rescanBtn: { paddingVertical: 4, paddingHorizontal: 2 },
+  rescanText: { color: '#2b9cd3', fontWeight: '700' },
+  scanErrorText: {
+    marginTop: 8,
+    color: '#c0392b',
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 12,
+  },
 
   radarSection: { alignItems: 'center', justifyContent: 'center', paddingTop: 10, paddingBottom: 8 },
   scanHint: { marginTop: 10, color: '#6b7280', fontWeight: '600' },

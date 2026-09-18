@@ -11,6 +11,8 @@ export type DeviceSummary = {
   device_name?: string;
   factory_name?: string;
   display_name?: string;
+  medical_device_type?: string;
+  platform?: string;
   endpoint_uuid?: string;
   status?: string;
   granted_at?: string;
@@ -35,9 +37,10 @@ const TYPE_ICONS: { [k: string]: any } = {
 
 export function getIconForDevice(d: DeviceSummary) {
   const text = (
-    `${d.device_type || ''} ${d.display_name || ''} ${d.device_name || ''} ${d.factory_name || ''}`
+    `${d.medical_device_type || ''} ${d.device_type || ''} ${d.display_name || ''} ${d.device_name || ''} ${d.factory_name || ''}`
   ).toLowerCase();
-  if (text.includes('oximeter')) return TYPE_ICONS.oximeter;
+  // Model codes like BO-YX310 do not contain the word "oximeter"
+  if (text.includes('oximeter') || /\bbo[-\s]?yx/i.test(text) || /\byx\d{2,}/i.test(text)) return TYPE_ICONS.oximeter;
   if (text.includes('pressure')) return TYPE_ICONS.pressure;
   if (text.includes('thermometer')) return TYPE_ICONS.thermometer;
   if (text.includes('glucose')) return TYPE_ICONS.glucose;

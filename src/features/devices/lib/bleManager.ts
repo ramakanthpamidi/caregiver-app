@@ -113,6 +113,18 @@ export async function resetBleManager(reason = 'unspecified'): Promise<void> {
   await resetInFlight;
 }
 
+/** Stop any active scan and give the Android BLE stack a moment to release. */
+export async function ensureScanStopped(settleMs = 250): Promise<void> {
+  try {
+    await Promise.resolve(getCurrentManager().stopDeviceScan?.());
+  } catch {
+    // ignore — already stopped or adapter unavailable
+  }
+  if (settleMs > 0) {
+    await new Promise((r) => setTimeout(r, settleMs));
+  }
+}
+
 export const bleManager: any = {
   startDeviceScan(...args: any[]) {
     return getCurrentManager().startDeviceScan(...args);

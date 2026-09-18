@@ -75,7 +75,9 @@ const defaultRows: AdviceRowModel[] = [
 
 export default function AdviceCard({ rows, onExport }: Props) {
   const { lang } = useLanguage();
-  const items = rows && rows.length > 0 ? rows : defaultRows;
+  // An explicit empty array means "no advice rows, export button only".
+  // Only fall back to the sample rows when rows is omitted entirely.
+  const items = rows ?? defaultRows;
 
   return (
     <View style={styles.container}>

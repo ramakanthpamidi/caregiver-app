@@ -85,9 +85,7 @@ export function AuthSessionProvider({ children }: { children: React.ReactNode })
 
   const refreshSession = useCallback(async () => {
     try {
-      console.log('[auth] refreshSession: reading token…');
       const token = await AsyncStorage.getItem('authToken');
-      console.log('[auth] refreshSession: token', token ? 'present' : 'absent');
       if (!token) {
         setIsLoggedInState(false);
         return;
@@ -110,16 +108,14 @@ export function AuthSessionProvider({ children }: { children: React.ReactNode })
         return;
       }
 
-      console.log('[auth] refreshSession: renewing token…');
       // Hard cap the renewal so a stalled network call can never hang launch.
       const isValid = await Promise.race([
         renewToken(token),
         new Promise<boolean>((resolve) => setTimeout(() => {
-          console.warn('[auth] token renewal timed out — treating token as valid offline');
+          // Renewal timed out — treat token as valid offline so launch proceeds.
           resolve(true);
         }, 3000)),
       ]);
-      console.log('[auth] refreshSession: token valid =', isValid);
       if (isValid) {
         setIsLoggedInState(true);
       } else {
@@ -139,7 +135,7 @@ export function AuthSessionProvider({ children }: { children: React.ReactNode })
     // so the login screen still shows.
     const timer = setTimeout(() => {
       if (!settled) {
-        console.warn('[auth] session bootstrap timed out — defaulting to logged out');
+        // Bootstrap timed out — default to logged out so the login screen shows.
         setIsLoggedInState(false);
       }
     }, 6000);
@@ -147,8 +143,7 @@ export function AuthSessionProvider({ children }: { children: React.ReactNode })
       try {
         await initializeSecureStorageForFreshInstall();
         await refreshSession();
-      } catch (error) {
-        console.error('[auth] session bootstrap failed:', error);
+      } catch {
         setIsLoggedInState(false);
       } finally {
         settled = true;

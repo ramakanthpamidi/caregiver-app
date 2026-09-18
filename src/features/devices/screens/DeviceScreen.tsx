@@ -17,6 +17,8 @@ import styles from './DeviceScreen.styles';
 import { useLanguage } from '../../../shared/i18n/LanguageContext';
 import { t } from '../../../shared/i18n';
 import { Layout, Spacing } from '../../../shared/theme/theme';
+import { subscribeDeviceUpdates } from '../lib/deviceEvents';
+import { classifyVitalDeviceKind } from '../lib/deviceKind';
 
 type MainDeviceKind = 'Pressure' | 'Glucose' | 'Thermometer' | 'Oximeter' | 'Scale';
 const KEY_MAIN_DEVICE_BY_KIND = 'home.preferredDeviceByKind.v1';
@@ -118,6 +120,13 @@ const DeviceScreen = React.memo(function DeviceScreen({ setIsLoggedIn: _setIsLog
     fetchDevices();
   }, [fetchDevices]);
 
+  // Refresh when Add/Rename/Remove emit device list changes (tab may stay mounted).
+  useEffect(() => {
+    return subscribeDeviceUpdates(() => {
+      void fetchDevices();
+    });
+  }, [fetchDevices]);
+
   useEffect(() => {
     const unsub = NetInfo.addEventListener((state) => {
       const online = !!state.isConnected && state.isInternetReachable !== false;
@@ -144,12 +153,17 @@ const DeviceScreen = React.memo(function DeviceScreen({ setIsLoggedIn: _setIsLog
   }, [lang]);
 
   const getDeviceKind = useCallback((device: DeviceSummary): MainDeviceKind | null => {
-    const text = `${device.device_type || ''} ${device.display_name || ''} ${device.device_name || ''} ${device.factory_name || ''}`.toLowerCase();
-    if (text.includes('pressure') || text.includes('bp')) return 'Pressure';
-    if (text.includes('glucose')) return 'Glucose';
-    if (text.includes('thermometer') || text.includes('temperature') || text.includes('temp')) return 'Thermometer';
-    if (text.includes('oximeter') || text.includes('spo2') || text.includes('o2')) return 'Oximeter';
-    if (isWeightScaleText(text)) return 'Scale';
+    const kind = classifyVitalDeviceKind({
+      device_type: device.device_type,
+      device_name: device.device_name,
+      factory_name: device.factory_name,
+      display_name: device.display_name,
+      medical_device_type: device.medical_device_type,
+      platform: device.platform,
+    });
+    if (kind === 'Pressure' || kind === 'Glucose' || kind === 'Thermometer' || kind === 'Oximeter' || kind === 'Scale') {
+      return kind;
+    }
     return null;
   }, []);
 
@@ -327,7 +341,14 @@ const DeviceScreen = React.memo(function DeviceScreen({ setIsLoggedIn: _setIsLog
           })
         )}
 
-        <AddDeviceModal visible={addModalVisible} onRequestClose={() => setAddModalVisible(false)} onDeviceAdded={() => fetchDevices()} />
+        <AddDeviceModal
+          visible={addModalVisible}
+          onRequestClose={() => {
+            setAddModalVisible(false);
+            void fetchDevices();
+          }}
+          onDeviceAdded={() => fetchDevices()}
+        />
 
         <RenameDeviceDialog
           visible={renameDialogVisible}

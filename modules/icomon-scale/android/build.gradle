@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.icomonscale'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.icomonscale"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  // ICOMON / Welland ICDeviceManager BLE SDK (weight + BMI + body-composition
+  // scales). Vendored locally — no public Maven/JitPack artifact exists for it.
+  implementation files('libs/ICDeviceManager.aar')
+}

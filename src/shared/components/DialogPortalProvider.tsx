@@ -56,15 +56,26 @@ export function DialogPortalProvider({ children }: { children: React.ReactNode }
   }, []);
 
   React.useEffect(() => {
+    // Only subscribe while something is open so empty back-presses are not handled here.
+    if (entries.length === 0 && backHandlersRef.current.size === 0) {
+      return;
+    }
+
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       const currentEntries = entriesRef.current;
-      console.log('[DialogPortalProvider] hardwareBackPress, entries:', currentEntries.length, 'handlers:', backHandlersRef.current.size);
+
       for (let index = currentEntries.length - 1; index >= 0; index -= 1) {
         const handler = backHandlersRef.current.get(currentEntries[index].id);
         if (!handler) continue;
-        console.log('[DialogPortalProvider] dispatching to entry:', currentEntries[index].id);
         return handler() !== false;
       }
+
+      const standalone = Array.from(backHandlersRef.current.entries()).reverse();
+      for (const [id, handler] of standalone) {
+        if (currentEntries.some((entry) => entry.id === id)) continue;
+        return handler() !== false;
+      }
+
       return false;
     });
     return () => sub.remove();

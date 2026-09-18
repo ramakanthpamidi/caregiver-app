@@ -25,7 +25,7 @@ export interface LocalAlert {
   message: string;
   deviceName: string;
   deviceId: string;
-  readingType: 'bp' | 'spo2' | 'glucose' | 'temp';
+  readingType: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi';
   reading: string;
   values: Record<string, number>;
   timestamp: number; // epoch ms
@@ -43,7 +43,7 @@ function nowId(): string {
 }
 
 function isReadingType(value: unknown): value is LocalAlert['readingType'] {
-  return value === 'bp' || value === 'spo2' || value === 'glucose' || value === 'temp';
+  return value === 'bp' || value === 'spo2' || value === 'glucose' || value === 'temp' || value === 'bmi';
 }
 
 function parseTimestampMs(value: unknown): number {
@@ -112,7 +112,7 @@ function inferReadingType(payload: Record<string, any>, values: Record<string, n
   if (typeof values.sys === 'number' || typeof values.dia === 'number') return 'bp';
   if (typeof values.spo2 === 'number') return 'spo2';
   if (typeof values.mgdl === 'number') return 'glucose';
-  if (typeof values.celsius === 'number') return 'temp';
+  if (typeof values.celsius === 'number' || typeof values.c === 'number') return 'temp';
 
   const text = [
     payload.title,
@@ -159,8 +159,13 @@ function formatReadingText(readingType: LocalAlert['readingType'], values: Recor
     return `${values.mgdl} mg/dL`;
   }
 
-  if (readingType === 'temp' && Number.isFinite(values.celsius)) {
-    return `${values.celsius.toFixed(1)}°C`;
+  const celsius = Number(values.celsius ?? values.c);
+  if (readingType === 'temp' && Number.isFinite(celsius)) {
+    return `${celsius.toFixed(1)}°C`;
+  }
+
+  if (readingType === 'bmi' && Number.isFinite(values.bmi)) {
+    return Number.isFinite(values.kg) ? `BMI ${values.bmi} • ${values.kg} kg` : `BMI ${values.bmi}`;
   }
 
   return fallbackText;

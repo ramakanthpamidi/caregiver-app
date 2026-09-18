@@ -5,6 +5,17 @@ import { t } from '../../../shared/i18n';
 import { Colors } from '../../../shared/theme/theme';
 import styles from '../screens/HomeScreen.styles';
 
+export type BodyCompositionData = {
+  fat: number | null;
+  muscle: number | null;
+  water: number | null;
+  protein: number | null;
+  visceral: number | null;
+  bmr: number | null;
+  bone: number | null;
+  bodyAge: number | null;
+} | null;
+
 export type HomeVitalCardItem = {
   id: string;
   title: string;
@@ -14,11 +25,13 @@ export type HomeVitalCardItem = {
   valueLine2?: string | null;
   accentColor?: string | null;
   bmiHintText?: string | null;
+  composition?: BodyCompositionData;
   hasDevice?: boolean;
   isConnected?: boolean;
   hasMultipleDevices?: boolean;
   locked?: boolean;
   onPress?: () => void;
+  onLongPress?: () => void;
 };
 
 type Props = {
@@ -34,15 +47,19 @@ const VitalCard = React.memo(function VitalCard({
   valueLine2,
   accentColor,
   bmiHintText,
+  composition,
   hasDevice = true,
   isConnected = false,
   hasMultipleDevices: _hasMultipleDevices = false,
   locked = false,
   onPress,
+  onLongPress,
 }: HomeVitalCardItem) {
   const { lang } = useLanguage();
-  const isLongCard = id === 'weight';
+  // The weight card spans the full row so it can show the full body-composition
+  // readout from the scale.
   const isWeightCard = id === 'weight';
+  const isLongCard = isWeightCard;
   const displayValue =
     valueText && String(valueText).trim().length > 0
       ? valueText
@@ -59,6 +76,19 @@ const VitalCard = React.memo(function VitalCard({
       : '--';
   const bmiLabel = t(lang, 'report_bmi').replace(/[\s:：]+$/g, '');
   const valueColor = accentColor || Colors.text;
+
+  const compositionChips = composition
+    ? ([
+        composition.fat != null ? { key: 'fat', label: t(lang, 'body_fat'), value: `${composition.fat}%` } : null,
+        composition.muscle != null ? { key: 'muscle', label: t(lang, 'muscle'), value: `${composition.muscle}%` } : null,
+        composition.water != null ? { key: 'water', label: t(lang, 'water'), value: `${composition.water}%` } : null,
+        composition.protein != null ? { key: 'protein', label: t(lang, 'protein'), value: `${composition.protein}%` } : null,
+        composition.visceral != null ? { key: 'visceral', label: t(lang, 'visceral_fat'), value: `${composition.visceral}` } : null,
+        composition.bmr != null ? { key: 'bmr', label: t(lang, 'bmr'), value: `${composition.bmr}` } : null,
+        composition.bone != null ? { key: 'bone', label: t(lang, 'bone_mass'), value: `${composition.bone} kg` } : null,
+        composition.bodyAge != null ? { key: 'bodyAge', label: t(lang, 'body_age'), value: `${composition.bodyAge}` } : null,
+      ].filter(Boolean) as { key: string; label: string; value: string }[])
+    : [];
 
   if (locked) {
     return (
@@ -141,6 +171,8 @@ const VitalCard = React.memo(function VitalCard({
       style={[styles.vitalCard, isLongCard ? styles.vitalCardLong : null]}
       activeOpacity={0.85}
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={400}
     >
       <View style={styles.vitalCardTopRow}>
         <Image source={icon} style={styles.vitalCardIcon} resizeMode="contain" />
@@ -156,41 +188,49 @@ const VitalCard = React.memo(function VitalCard({
 
       <View style={[styles.vitalCardValueArea, isLongCard ? styles.vitalCardValueAreaLong : null]}>
         {isWeightCard ? (
-          <View style={styles.weightSplitRow}>
-            <View style={styles.weightSplitMetric}>
-              <Text style={styles.weightSplitLabel} numberOfLines={1}>
-                {bmiLabel}
-              </Text>
-              <Text
-                style={[styles.weightSplitValue, { color: valueColor }]}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.7}
-              >
-                {displayBmi}
-              </Text>
-              {bmiHintText ? (
-                <Text style={styles.weightSplitHint} numberOfLines={2}>
-                  {bmiHintText}
+          <View style={styles.weightFullWrap}>
+            <View style={styles.weightFullHeader}>
+              <View style={styles.weightFullMetric}>
+                <Text style={styles.weightSplitLabel} numberOfLines={1}>{title}</Text>
+                <Text
+                  style={[styles.weightBmiSubValue, { color: valueColor }]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.6}
+                >
+                  {displayWeightWithUnit}
                 </Text>
-              ) : null}
+              </View>
+              <View style={styles.weightSplitDivider} />
+              <View style={styles.weightFullMetric}>
+                <Text style={styles.weightSplitLabel} numberOfLines={1}>{bmiLabel}</Text>
+                <Text
+                  style={[styles.weightBmiSubValue, { color: valueColor }]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.6}
+                >
+                  {displayBmi}
+                </Text>
+              </View>
             </View>
 
-            <View style={styles.weightSplitDivider} />
-
-            <View style={styles.weightSplitMetric}>
-              <Text style={styles.weightSplitLabel} numberOfLines={1}>
-                {title}
-              </Text>
-              <Text
-                style={[styles.weightSplitValue, { color: valueColor }]}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.7}
-              >
-                {displayWeightWithUnit}
-              </Text>
-            </View>
+            {compositionChips.length > 0 ? (
+              <View style={styles.compositionGrid}>
+                {compositionChips.map(c => (
+                  <View key={c.key} style={styles.compositionChip}>
+                    <Text style={styles.compositionValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+                      {c.value}
+                    </Text>
+                    <Text style={styles.compositionLabel} numberOfLines={1}>{c.label}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              bmiHintText ? (
+                <Text style={styles.weightSplitHint} numberOfLines={2}>{bmiHintText}</Text>
+              ) : null
+            )}
           </View>
         ) : (
           <>

@@ -17,7 +17,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
-import { updateProfile, upsertMedicalGeneral, getMedicalGeneral, deleteProfile, getMyProfiles, type MedicalGeneralInfoPayload } from '../api/profileApi';
+import { updateProfile, upsertMedicalGeneral, upsertProfileConsents, getMedicalGeneral, deleteProfile, getMyProfiles, type MedicalGeneralInfoPayload } from '../api/profileApi';
 import TooltipError from '../../../shared/components/TooltipError';
 import InfoDialog from '../../../shared/components/InfoDialog';
 import Button from '../../../shared/components/Button';
@@ -644,6 +644,14 @@ export default function EditProfileScreen({ profile, onComplete, onBack }: Props
           insurance_provider: insuranceProvider.trim() || null,
           insurance_number: insuranceNumber.trim() || null,
         };
+        // Entering and saving health data implies consent to store it. The
+        // backend requires an explicit consent_granted flag, and the only place
+        // it was previously set was profile creation — so record it here too.
+        try {
+          await upsertProfileConsents(token, profile.id, { consent_granted: true, source: 'App' });
+        } catch {
+          // consent upsert is best-effort; the medical write below will surface real errors
+        }
         await upsertMedicalGeneral(token, profile.id, medicalPayload);
       }
 

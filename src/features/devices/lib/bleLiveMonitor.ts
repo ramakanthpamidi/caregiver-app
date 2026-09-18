@@ -17,10 +17,13 @@ import type { Device, Characteristic, Service } from 'react-native-ble-plx';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { bleManager, base64ToBytes, clearDeviceConnectionState, resetBleManager } from './bleManager';
 import { setLiveReading, getLiveReadingsSnapshot, type MeasurementKind } from './liveReadings';
-import { sendMedicalData } from '../../profiles/api/profileApi';
+import { classifyMeasurementKind } from './deviceKind';
+import { sendMedicalData, sendMedicalEvent } from '../../profiles/api/profileApi';
 import { isOnlineSync } from '../../../shared/sync/networkSync';
 import { enqueueMedicalData, enqueueMedicalEvent } from '../../../shared/sync/syncOutbox';
 import { getCurrentPosition } from '../../../shared/lib/location';
+import { notifyAilinkDeviceSeen } from '../../../shared/lib/ailinkScale';
+import { notifyIcomonDeviceSeen } from '../../../shared/lib/icomonScale';
 import type { DeviceSummary } from '../components/ScanDeviceCard';
 import {
   evaluateBloodPressure,
@@ -91,20 +94,35 @@ function decodeIEEE11073FloatLE(bytes: number[], offset: number): number | null 
 }
 
 function parseOximeter(bytes: number[]) {
-  // Ported from legacy Kotlin:
-  // - If payload >= 6 bytes, pulse=bytes[4], spo2=bytes[5]
-  // - Else scan adjacent pairs for (pulse 20..220, spo2 50..100)
+  // Yuwell proprietary frames (see ble/yuwellOximeter.js):
+  // 0xFE-framed packets; id 0x55 is 1 Hz measurement (HR 16-bit BE, SpO2).
+  // A single notification may batch several frames — scan every offset.
   let pulse: number | null = null;
   let spo2: number | null = null;
 
-  if (bytes.length >= 6) {
+  for (let o = 0; o + 6 <= bytes.length; o++) {
+    if ((bytes[o] & 0xff) !== 0xfe) continue;
+    const id = bytes[o + 2] & 0xff;
+    if (id === 0x55 && o + 6 <= bytes.length) {
+      const hr = ((bytes[o + 3] & 0xff) << 8) | (bytes[o + 4] & 0xff);
+      const s = bytes[o + 5] & 0xff;
+      if (s >= 50 && s <= 100) spo2 = s;
+      if (hr >= 20 && hr <= 220) pulse = hr;
+      // Prefer the first valid measurement frame in the batch.
+      if (spo2 != null) break;
+    }
+  }
+
+  // Legacy / generic layout (some firmwares): pulse=bytes[4], spo2=bytes[5]
+  if (spo2 === null && bytes.length >= 6) {
     const p = bytes[4] & 0xff;
     const s = bytes[5] & 0xff;
     if (p >= 20 && p <= 220) pulse = p;
     if (s >= 50 && s <= 100) spo2 = s;
   }
 
-  if (pulse === null || spo2 === null) {
+  // Adjacent-pair scan fallback
+  if (spo2 === null) {
     for (let i = 0; i < bytes.length - 1; i++) {
       const a = bytes[i] & 0xff;
       const b = bytes[i + 1] & 0xff;
@@ -121,8 +139,10 @@ function parseOximeter(bytes: number[]) {
     }
   }
 
-  if (pulse === null || spo2 === null) return null;
-  return { pulse, spo2, text: `${spo2}% / ${pulse} bpm` };
+  if (spo2 === null) return null;
+  const text =
+    pulse != null && pulse > 0 ? `${spo2}% / ${pulse} bpm` : `${spo2}%`;
+  return { pulse, spo2, text };
 }
 
 function parseBattery(bytes: number[]) {
@@ -325,22 +345,15 @@ function parseGlucose(bytes: number[]) {
 }
 
 function classifyFromText(d: DeviceSummary): MeasurementKind {
-  const text = `${d.device_type || ''} ${d.device_name || ''} ${d.factory_name || ''} ${d.display_name || ''}`.toLowerCase();
-  if (text.includes('pressure') || text.includes('blood pressure') || text.includes('bp')) return 'bp';
-  if (text.includes('glucose') || text.includes('blood glucose')) return 'glucose';
-  if (text.includes('thermometer') || text.includes('temperature') || text.includes('temp')) return 'temp';
-  if (text.includes('oximeter') || text.includes('spo2') || text.includes('o2')) return 'spo2';
-  return 'unknown';
-}
-
-function getInitialText(kind: MeasurementKind): string {
-  switch (kind) {
-    case 'bp': return '0/0 mmHg';
-    case 'spo2': return '0% / 0 bpm';
-    case 'temp': return '0.0°C';
-    case 'glucose': return '0 mg/dL';
-    default: return '0';
-  }
+  // Shared classifier recognizes Yuwell model codes (e.g. BO-YX310) as well as keywords.
+  return classifyMeasurementKind({
+    device_type: d.device_type,
+    device_name: d.device_name,
+    factory_name: d.factory_name,
+    display_name: d.display_name,
+    medical_device_type: (d as any).medical_device_type,
+    platform: (d as any).platform,
+  });
 }
 
 function shouldEnableBleNow(active: boolean) {
@@ -556,9 +569,17 @@ async function generateAlertIfNeeded(
     }
 
     const severity = healthStatusToSeverity(status);
+    const alertValues =
+      kind === 'temp'
+        ? {
+            ...values,
+            celsius: Number(values.celsius ?? values.c),
+            c: Number(values.c ?? values.celsius),
+          }
+        : values;
     const title = getAlertTitle(kind, status, _sessionLang);
-    const message = getAlertMessage(kind, status, values, _sessionLang);
-    const readingText = formatReadingText(kind, values);
+    const message = getAlertMessage(kind, status, alertValues, _sessionLang);
+    const readingText = formatReadingText(kind, alertValues);
     const deviceName = getDeviceNameForType(kind);
 
     // For Critical and Warning, always add alert immediately
@@ -572,7 +593,7 @@ async function generateAlertIfNeeded(
       deviceId,
       readingType: kind,
       reading: readingText,
-      values,
+      values: alertValues,
       timestamp: ts,
       profileId,
     });
@@ -594,10 +615,10 @@ async function generateAlertIfNeeded(
       `refreshBadge(${deviceId})`
     );
 
-    // Queue alert for server sync (with GPS location for emergency dispatch)
+    // Upload alert immediately when online (same as medical data). Outbox is fallback.
     try {
       const loc = await getCurrentPosition();
-      await enqueueMedicalEvent({
+      const eventPayload = {
         device_id: deviceId,
         profile_id: profileId,
         ts,
@@ -607,12 +628,27 @@ async function generateAlertIfNeeded(
           title,
           message,
           reading: readingText,
-          values,
+          values: alertValues,
+          readingType: kind,
           status,
         },
         ...(loc && { lat: loc.lat, lng: loc.lng }),
-      });
-      console.log('[BLE_MON] Queued alert event for sync', loc ? `(${loc.lat},${loc.lng})` : '(no GPS)');
+      };
+
+      const token = _sessionAuthToken ?? await AsyncStorage.getItem('authToken');
+      const online = isOnlineSync();
+      if (online && token) {
+        try {
+          await sendMedicalEvent(token, eventPayload);
+          console.log('[BLE_MON] Uploaded alert event for', deviceId, kind);
+        } catch (err: any) {
+          console.log('[BLE_MON] Immediate alert upload failed, queueing:', err?.message);
+          await enqueueMedicalEvent(eventPayload);
+        }
+      } else {
+        await enqueueMedicalEvent(eventPayload);
+        console.log('[BLE_MON] Queued alert event for sync', loc ? `(${loc.lat},${loc.lng})` : '(no GPS)');
+      }
     } catch (err) {
       console.log('[BLE_MON] Failed to queue alert event:', err);
     }
@@ -644,7 +680,23 @@ function isYuwellDevice(device: Device): boolean {
   return name.includes('yuwell');
 }
 
-export function useBleLiveMonitor({ active, devices, restartKey }: { active: boolean; devices: DeviceSummary[]; restartKey?: number }) {
+export function useBleLiveMonitor({
+  active,
+  devices,
+  restartKey,
+  scanForScaleHandoff,
+}: {
+  active: boolean;
+  devices: DeviceSummary[];
+  restartKey?: number;
+  // The AILink/ICOMON scale monitors don't own a scan of their own — they piggyback
+  // on this scan's onDeviceScanned callback (see notifyAilinkDeviceSeen /
+  // notifyIcomonDeviceSeen below) to detect their target device advertising and then
+  // connect via their own native SDK. Without this flag, a user whose only registered
+  // BLE device is a scale (empty targetMap) would never start a scan at all, so the
+  // scale would never be seen and would silently never report data.
+  scanForScaleHandoff?: boolean;
+}) {
   const stopRef = useRef<(() => void) | null>(null);
 
   // Build a map of MAC -> device info for quick lookup during scan
@@ -664,7 +716,7 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
 
   useEffect(() => {
     if (!shouldEnableBleNow(active)) return;
-    if (targetMap.size === 0) return;
+    if (targetMap.size === 0 && !scanForScaleHandoff) return;
 
     console.log('[BLE_MON] Starting live monitor with targets:', Array.from(targetMap.keys()));
 
@@ -1343,7 +1395,7 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
               if (uuid === UUIDS.thermometerMeasurement) {
                 const t = parseTemp(bytes);
                 if (t) {
-                  setLiveReading(deviceId, { kind: 'temp', text: t.text, ts: now, values: { c: t.c } });
+                  setLiveReading(deviceId, { kind: 'temp', text: t.text, ts: now, values: { c: t.c, celsius: t.c } });
                   if (sessionProfileId && t.c > 0) {
                     fireAndForget(
                       savePersistedLiveReadings(sessionProfileId, { tempC: t.c, tempTs: now }),
@@ -1421,7 +1473,7 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
                 } else if (preferredKind === 'temp') {
                   const t = parseTemp(bytes);
                   if (t) {
-                    setLiveReading(deviceId, { kind: 'temp', text: t.text, ts: now, values: { c: t.c } });
+                    setLiveReading(deviceId, { kind: 'temp', text: t.text, ts: now, values: { c: t.c, celsius: t.c } });
                     if (sessionProfileId && t.c > 0) {
                       fireAndForget(
                         savePersistedLiveReadings(sessionProfileId, { tempC: t.c, tempTs: now }),
@@ -1511,6 +1563,14 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
       if (error) {
         console.log('[BLE_MON] scan callback error:', error?.message || error);
         isScanning = false;
+        // While the adapter is off, the scan will keep rejecting immediately —
+        // retrying on a timer just spams this every ~750ms with nothing to do.
+        // bleStateSub (onStateChange) already calls startScan() the moment the
+        // adapter reports PoweredOn again, so just wait for that instead.
+        if (/powered off/i.test(error?.message || '')) {
+          console.log('[BLE_MON] adapter is off — waiting for onStateChange instead of retrying');
+          return;
+        }
         scheduleScanRetry(`scan callback error: ${error?.message || error}`);
         return;
       }
@@ -1524,6 +1584,13 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
       // with only a model code like "FT87" or "RT1000").
       const scannedMac = normalizeMac(device.id);
       if (!scannedMac) return;
+
+      // Let the AILink / ICOMON scale adapters piggyback on this scan: the scale
+      // advertises here too, and each adapter connects it via its own native SDK
+      // when it's its target. This reuses the single ble-plx scan (no second
+      // scan / conflict).
+      try { notifyAilinkDeviceSeen(device.id); } catch { /* ignore */ }
+      try { notifyIcomonDeviceSeen(device.id); } catch { /* ignore */ }
 
       const target = targetMap.get(scannedMac);
       // If not a registered device AND not a Yuwell-named device, skip quickly
@@ -1564,14 +1631,10 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
           return false;
         })();
 
-        if (!hasValidExistingReading) {
-          setLiveReading(scannedMac, {
-            kind,
-            text: getInitialText(kind),
-            ts: Date.now(),
-            values: {},
-          });
-        }
+        // Intentionally do NOT seed a placeholder reading here. A detected-but-
+        // unmeasured device should render as "--" (the standard no-reading state),
+        // driven by isConnected/hasDevice — never as a fake "0/0 mmHg" value, which
+        // looks like a real (wrong) measurement after a reload clears live readings.
       }
 
       // If not already connected, connect and monitor
@@ -1622,7 +1685,13 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
             scheduleScanRetry(`startDeviceScan rejected: ${err?.message || err}`);
           });
           isScanning = true;
-          scanRetryAttempt = 0;
+          // NOTE: do not reset scanRetryAttempt here — startDeviceScan() resolving
+          // just means the request was accepted, not that the scan is actually
+          // producing results (e.g. BT powered off still "succeeds" here and only
+          // reports the real error later via onDeviceScanned's error callback).
+          // Resetting it unconditionally on every startScan() call defeated the
+          // exponential backoff below, pinning every retry at the 750ms floor.
+          // The legitimate reset lives in onDeviceScanned, on an actual scan result.
         } catch (err: any) {
           console.log('[BLE_MON] startDeviceScan error:', err?.message);
           isScanning = false;
@@ -1658,7 +1727,7 @@ export function useBleLiveMonitor({ active, devices, restartKey }: { active: boo
     return () => {
       stopAll();
     };
-  }, [active, targetMap, restartKey]);
+  }, [active, targetMap, restartKey, scanForScaleHandoff]);
 
   useEffect(() => {
     if (active) return;

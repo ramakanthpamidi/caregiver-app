@@ -110,6 +110,11 @@ function getBodyFatPercent(bodyFat?: Record<string, unknown>) {
 }
 
 function isScaleDevice(device: DeviceSummary) {
+  // A device explicitly recorded as an ICOMON scale at pairing time (see
+  // BleMonitoringHost) belongs to the ICOMON monitor, not this one, even if
+  // its factory-renamed BLE name also happens to read as a generic "scale".
+  const platform = String(device.platform || '').trim().toLowerCase();
+  if (platform === 'icomon') return false;
   return isWeightScaleText(
     `${device.device_type || ''} ${device.device_name || ''} ${
       device.factory_name || ''

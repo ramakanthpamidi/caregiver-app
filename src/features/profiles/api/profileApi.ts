@@ -428,6 +428,34 @@ export async function sendMedicalData(token: string, data: MedicalDataSnapshot):
   return result;
 }
 
+export type MedicalEventSnapshot = {
+  device_id: string;
+  profile_id: number;
+  ts: number;
+  event_type: string;
+  payload: Record<string, any>;
+  lat?: number | null;
+  lng?: number | null;
+};
+
+/** Upload an alert / medical event immediately (same path as outbox sync). */
+export async function sendMedicalEvent(token: string, data: MedicalEventSnapshot): Promise<any> {
+  const resp = await fetchWithTimeout(apiUrl('/medical-events'), {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({
+      device_id: data.device_id,
+      profile_id: data.profile_id,
+      ts: data.ts,
+      event_type: data.event_type,
+      payload: data.payload,
+      ...(data.lat != null && { lat: data.lat }),
+      ...(data.lng != null && { lng: data.lng }),
+    }),
+  });
+  return parseJsonOrThrow(resp);
+}
+
 export async function getMedicalDataRaw(
   token: string,
   profileId: number,

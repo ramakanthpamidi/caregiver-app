@@ -14,7 +14,7 @@ import { Theme, Shadows } from '../../../shared/theme/theme';
 export interface DisplayAlert {
   id: string;
   severity: AlertSeverity;
-  readingType: 'bp' | 'spo2' | 'glucose' | 'temp';
+  readingType: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bmi';
   title: string;
   message: string;
   deviceName: string;

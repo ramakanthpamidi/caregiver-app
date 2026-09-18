@@ -420,14 +420,10 @@ const LoginScreen = ({
         data = null;
       }
 
-      console.log('[login] response.ok=', response.ok, 'status=', response.status);
       if (response.ok) {
         const token = data?.token || data?.access_token || data?.jwt;
-        console.log('[login] token received =', token ? 'yes' : 'no');
         if (token) {
           await AsyncStorage.setItem('authToken', token);
-          const readBack = await AsyncStorage.getItem('authToken');
-          console.log('[login] token persisted & read back =', readBack ? 'yes' : 'NO');
           onboarding.resetDraft();
           if (typeof setLoggedIn === 'function') setLoggedIn(true);
           setFieldErrors({ email: false, password: false });

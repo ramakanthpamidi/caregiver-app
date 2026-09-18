@@ -258,6 +258,55 @@ export const styles = StyleSheet.create({
     color: Colors.text,
     textAlign: 'center',
   },
+  weightStack: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  weightBmiSubValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 24,
+    textAlign: 'center',
+    marginTop: 2,
+  },
+  weightFullWrap: {
+    width: '100%',
+  },
+  weightFullHeader: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    marginBottom: Spacing.md,
+  },
+  weightFullMetric: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  compositionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  compositionChip: {
+    width: '23%',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  compositionValue: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Colors.text,
+    textAlign: 'center',
+  },
+  compositionLabel: {
+    fontSize: 10,
+    lineHeight: 13,
+    color: Colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 1,
+  },
   weightSplitRow: {
     width: '100%',
     minHeight: 62,

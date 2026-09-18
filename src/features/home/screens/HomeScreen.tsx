@@ -14,6 +14,7 @@ import {
   StyleSheet,
   StatusBar,
   Animated,
+  Alert,
   InteractionManager,
   useWindowDimensions,
 } from 'react-native';
@@ -26,6 +27,7 @@ import {
   API_BASE_URL,
   getMedicalGeneral,
   upsertMedicalGeneral,
+  sendMedicalData,
   type MedicalGeneralInfoPayload,
 } from '../../profiles/api/profileApi';
 import { showToast } from '../../../shared/ui/toast';
@@ -33,14 +35,25 @@ import NetInfo from '@react-native-community/netinfo';
 import { DeviceSummary } from '../../devices/components/ScanDeviceCard';
 import {
   requestTrendDetail,
+  setTrendDetailOverlayState,
   type TrendDetailMetric,
+  useActiveTab,
   useTabNavigationActions,
 } from '../../../shared/navigation/tabNavigation';
 import {
   useLiveReadings,
   clearAllLiveReadings,
+  clearLiveReadingKind,
+  getLatestReadingOfKind,
+  getReadingsForDevice,
   type MeasurementKind,
+  type LiveReading,
 } from '../../devices/lib/liveReadings';
+import { loadPersistedLiveReadings } from '../../devices/storage/persistedLiveReadings';
+import { classifyVitalDeviceKind } from '../../devices/lib/deviceKind';
+import { recordBmiAlert } from '../../alerts/lib/bmiAlert';
+import { DEFAULT_HEIGHT_CM, useLatestWeightBmi } from '../../trends/lib/weightBmi';
+import WeightDetailOverlay from '../../trends/components/WeightDetailOverlay';
 import { getCachedProfiles } from '../../profiles/storage/profileCache';
 import { isDeviceMarkedConnected } from '../../devices/lib/bleManager';
 import {
@@ -77,6 +90,7 @@ import {
   isWeightScaleText,
   type AILinkScaleEvent,
 } from '../../../shared/lib/ailinkScale';
+import { addIcomonScaleListener, isIcomonAvailable } from '../../../shared/lib/icomonScale';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import {
   evaluateBloodPressure,
@@ -87,9 +101,7 @@ import {
   getOverallStatus,
   getStatusMessage,
   toWidgetOverallStatus,
-  toTrendStatus,
   type HealthStatusLevel,
-  type HealthTrendStatus,
 } from '../../../shared/lib/healthThresholds';
 
 import styles from './HomeScreen.styles';
@@ -101,7 +113,8 @@ import {
   Radius,
   Shadows,
 } from '../../../shared/theme/theme';
-import { enqueueUpsertMedicalGeneral } from '../../../shared/sync/syncOutbox';
+import { enqueueUpsertMedicalGeneral, enqueueMedicalData } from '../../../shared/sync/syncOutbox';
+import { isOnlineSync } from '../../../shared/sync/networkSync';
 import {
   getSecureItem,
   setSecureItem,
@@ -269,6 +282,47 @@ function extractWeightKgFromEvent(event: AILinkScaleEvent): number | null {
   return match ? normalizeWeightKg(match[1]) : null;
 }
 
+// The scale computes BMI onboard (from the profile height sent via setUserInfo)
+// and reports it on the completed measurement. Used as a display/record fallback
+// when the locally height-derived BMI isn't available yet.
+function extractScaleBmiFromEvent(event: AILinkScaleEvent): number | null {
+  const raw = (event.bodyFat as { bmi?: unknown } | undefined)?.bmi;
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  return Number.isFinite(n) && n > 0 ? Number(n.toFixed(1)) : null;
+}
+
+export type ScaleComposition = {
+  fat: number | null;
+  muscle: number | null;
+  water: number | null;
+  protein: number | null;
+  visceral: number | null;
+  bmr: number | null;
+  bone: number | null;
+  bodyAge: number | null;
+};
+
+// Pull the full body-composition readout from a completed scale measurement.
+function extractCompositionFromEvent(event: AILinkScaleEvent): ScaleComposition {
+  const bf = (event.bodyFat || {}) as Record<string, unknown>;
+  const posNum = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : parseFloat(String(v));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const pct = (v: unknown) => { const n = posNum(v); return n == null ? null : Number(n.toFixed(1)); };
+  const whole = (v: unknown) => { const n = posNum(v); return n == null ? null : Math.round(n); };
+  return {
+    fat: pct(bf.bodyFat),
+    muscle: pct(bf.muscle),
+    water: pct(bf.water),
+    protein: pct(bf.protein),
+    visceral: pct(bf.visceralFat),
+    bmr: whole(bf.bmr),
+    bone: pct(bf.boneMass),
+    bodyAge: whole(bf.bodyAge),
+  };
+}
+
 function getMedicalGeneralCacheKey(profileId: number): string {
   return `medicalGeneralCache.v1.${profileId}`;
 }
@@ -328,6 +382,7 @@ const HomeScreen = React.memo(function HomeScreen({
   const { lang } = useLanguage();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
+  const activeTab = useActiveTab();
   const { navigateTo, openProfileSheet, profileSheetOpen, profileSheetAnim } =
     useTabNavigationActions();
   const [headerHeight, setHeaderHeight] = useState<number>(0);
@@ -357,32 +412,82 @@ const HomeScreen = React.memo(function HomeScreen({
   const [medicalGeneral, setMedicalGeneral] = useState<any | null>(null);
   const [medicalHeightCm, setMedicalHeightCm] = useState<number | null>(null);
   const lastWeightSyncKeyRef = useRef<string>('');
+  // Set only on a completed measurement (not live weight) → recorded as a
+  // time-series medical event so the Trends screen can chart weight/BMI history.
+  const [completedWeight, setCompletedWeight] = useState<{ kg: number; ts: number; scaleBmi: number | null; composition: ScaleComposition | null } | null>(null);
+  // Latest full body-composition readout shown on the Home weight card
+  // (persisted so it survives reload).
+  const [bodyComposition, setBodyComposition] = useState<ScaleComposition | null>(null);
+  // Last temperature from EncryptedStorage — Trends already uses this; Home
+  // previously only looked at the classified thermometer's live reading.
+  const [persistedTempC, setPersistedTempC] = useState<number | null>(null);
+  const weightEventKeyRef = useRef<string>('');
+  // Weight & BMI history detail (opened by tapping the Weight card).
+  const [weightDetailOpen, setWeightDetailOpen] = useState(false);
+  const homeLatestWeightBmi = useLatestWeightBmi(activeProfileId);
+
+  const closeWeightDetail = useCallback(() => {
+    setWeightDetailOpen(false);
+  }, []);
+
+  // Close weight history when leaving Home; register as detail overlay for tab switches.
+  useEffect(() => {
+    if (activeTab !== 'Home' && weightDetailOpen) {
+      setWeightDetailOpen(false);
+    }
+  }, [activeTab, weightDetailOpen]);
+
+  useEffect(() => {
+    if (!weightDetailOpen) return;
+    setTrendDetailOverlayState(true, closeWeightDetail);
+    return () => {
+      setTrendDetailOverlayState(false);
+    };
+  }, [weightDetailOpen, closeWeightDetail]);
+
+  // Shared by both scale adapters below — AILink and ICOMON emit into the same
+  // AILinkScaleEvent shape (see shared/lib/icomonScale.ts), so one handler
+  // drives the Home weight card regardless of which vendor's scale is paired.
+  const handleScaleEvent = useCallback((event: AILinkScaleEvent) => {
+    if (event.type === 'connected') {
+      setWeightScaleConnected(true);
+    }
+
+    if (event.type === 'disconnected') {
+      setWeightScaleConnected(false);
+    }
+
+    if (event.type === 'weight' || event.type === 'complete') {
+      setWeightScaleConnected(true);
+      const kg = extractWeightKgFromEvent(event);
+      if (kg != null && kg > 0) {
+        setLastWeightKg(kg);
+        const name = event.displayName || event.name || null;
+        if (name) setWeightScaleName(name);
+        // Only a finished measurement becomes a recorded trend point.
+        if (event.type === 'complete') {
+          const composition = extractCompositionFromEvent(event);
+          setCompletedWeight({ kg, ts: Date.now(), scaleBmi: extractScaleBmiFromEvent(event), composition });
+          setBodyComposition(composition);
+        }
+      }
+    }
+  }, []);
 
   // Listen for AILink scale events (weight + complete)
   useEffect(() => {
     if (!isAilinkAvailable()) return;
-    const unsubscribe = addAilinkScaleListener((event: AILinkScaleEvent) => {
-      if (event.type === 'connected') {
-        setWeightScaleConnected(true);
-      }
-
-      if (event.type === 'disconnected') {
-        setWeightScaleConnected(false);
-      }
-
-      if (event.type === 'weight' || event.type === 'complete') {
-        setWeightScaleConnected(true);
-        const kg = extractWeightKgFromEvent(event);
-        console.log('[home] scale event', event.type, 'extracted kg=', kg);
-        if (kg != null && kg > 0) {
-          setLastWeightKg(kg);
-          const name = event.displayName || event.name || null;
-          if (name) setWeightScaleName(name);
-        }
-      }
-    });
+    const unsubscribe = addAilinkScaleListener(handleScaleEvent);
     return unsubscribe;
-  }, []);
+  }, [handleScaleEvent]);
+
+  // Listen for ICOMON scale events (weight + complete) — same handler, same
+  // Home weight card, Trends and Alerts pipeline as AILink.
+  useEffect(() => {
+    if (!isIcomonAvailable()) return;
+    const unsubscribe = addIcomonScaleListener(handleScaleEvent);
+    return unsubscribe;
+  }, [handleScaleEvent]);
 
   // Restore the last weight reading per profile so the Home card survives tab
   // switches and app restarts (live scale events are otherwise transient).
@@ -394,8 +499,12 @@ const HomeScreen = React.memo(function HomeScreen({
       try {
         const raw = await AsyncStorage.getItem(`homeLastWeight.v1.${profileId}`);
         if (alive && raw) {
-          const kg = Number(JSON.parse(raw)?.kg);
+          const parsed = JSON.parse(raw);
+          const kg = Number(parsed?.kg);
           if (Number.isFinite(kg) && kg > 0) setLastWeightKg(kg);
+          if (parsed?.composition && typeof parsed.composition === 'object') {
+            setBodyComposition(parsed.composition as ScaleComposition);
+          }
         }
       } catch {
         // ignore restore failures
@@ -404,15 +513,15 @@ const HomeScreen = React.memo(function HomeScreen({
     return () => { alive = false; };
   }, [activeProfileId]);
 
-  // Persist the last weight whenever it changes.
+  // Persist the last weight + body composition whenever they change.
   useEffect(() => {
     const profileId = activeProfileId;
     if (!profileId || lastWeightKg == null || lastWeightKg <= 0) return;
     AsyncStorage.setItem(
       `homeLastWeight.v1.${profileId}`,
-      JSON.stringify({ kg: lastWeightKg, ts: Date.now() }),
+      JSON.stringify({ kg: lastWeightKg, ts: Date.now(), composition: bodyComposition }),
     ).catch(() => {});
-  }, [activeProfileId, lastWeightKg]);
+  }, [activeProfileId, lastWeightKg, bodyComposition]);
 
   // Fetch profile height from medical_general_info for BMI display on the weight card.
   useEffect(() => {
@@ -582,6 +691,35 @@ const HomeScreen = React.memo(function HomeScreen({
 
   // cause rerender when readings update and get live readings snapshot
   const liveReadings = useLiveReadings();
+
+  // Same cache Trends uses so Home still shows the last temp after reload.
+  useEffect(() => {
+    let alive = true;
+    if (!activeProfileId) {
+      setPersistedTempC(null);
+      return;
+    }
+    loadPersistedLiveReadings(activeProfileId)
+      .then((saved) => {
+        if (!alive) return;
+        setPersistedTempC(typeof saved.tempC === 'number' && saved.tempC > 0 ? saved.tempC : null);
+      })
+      .catch(() => {
+        if (alive) setPersistedTempC(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeProfileId]);
+
+  // Keep Home's last-temp cache in lockstep with live BLE readings.
+  useEffect(() => {
+    const latest = getLatestReadingOfKind('temp');
+    const c = Number(latest?.values?.c ?? latest?.values?.celsius);
+    if (Number.isFinite(c) && c > 0) {
+      setPersistedTempC(c);
+    }
+  }, [liveReadings]);
 
   const refreshActiveProfileFromCache = useCallback(
     async (preferredId?: number | null) => {
@@ -819,11 +957,6 @@ const HomeScreen = React.memo(function HomeScreen({
   }, [fetchDevices]);
 
   const topCards = useMemo(() => {
-    const normalize = (d: DeviceSummary) =>
-      `${d.device_type || ''} ${d.device_name || ''} ${
-        d.factory_name || ''
-      }`.toLowerCase();
-
     type Category = 'Blood Pressure' | 'Blood Glucose' | 'Temperature' | 'SpO2';
     const categoryOrder: Category[] = [
       'Blood Pressure',
@@ -845,27 +978,18 @@ const HomeScreen = React.memo(function HomeScreen({
     };
 
     const classify = (d: DeviceSummary): Category | null => {
-      const text = normalize(d);
-      if (
-        text.includes('pressure') ||
-        text.includes('blood pressure') ||
-        text.includes('bp')
-      )
-        return 'Blood Pressure';
-      if (text.includes('glucose') || text.includes('blood glucose'))
-        return 'Blood Glucose';
-      if (
-        text.includes('thermometer') ||
-        text.includes('temperature') ||
-        text.includes('temp')
-      )
-        return 'Temperature';
-      if (
-        text.includes('oximeter') ||
-        text.includes('spo2') ||
-        text.includes('o2')
-      )
-        return 'SpO2';
+      const kind = classifyVitalDeviceKind({
+        device_type: d.device_type,
+        device_name: d.device_name,
+        factory_name: d.factory_name,
+        display_name: d.display_name,
+        medical_device_type: (d as any).medical_device_type,
+        platform: (d as any).platform,
+      });
+      if (kind === 'Pressure') return 'Blood Pressure';
+      if (kind === 'Glucose') return 'Blood Glucose';
+      if (kind === 'Thermometer') return 'Temperature';
+      if (kind === 'Oximeter') return 'SpO2';
       return null;
     };
 
@@ -922,6 +1046,8 @@ const HomeScreen = React.memo(function HomeScreen({
       // Check if device is marked as connected in BLE manager
       return (
         isDeviceMarkedConnected(deviceId) ||
+        isDeviceMarkedConnected(normalizedDeviceId) ||
+        !!getReadingsForDevice(deviceId) ||
         liveReadings.has(normalizedDeviceId)
       );
     },
@@ -969,29 +1095,103 @@ const HomeScreen = React.memo(function HomeScreen({
     });
   }, [sortedDevices]);
 
-  const getDeviceKind = useCallback(
-    (device: DeviceSummary): VitalKind | null => {
-      const text = `${device.device_type || ''} ${device.display_name || ''} ${
-        device.device_name || ''
-      } ${device.factory_name || ''}`.toLowerCase();
-      if (text.includes('pressure') || text.includes('bp')) return 'Pressure';
-      if (text.includes('glucose')) return 'Glucose';
-      if (
-        text.includes('thermometer') ||
-        text.includes('temperature') ||
-        text.includes('temp')
-      )
-        return 'Thermometer';
-      if (
-        text.includes('oximeter') ||
-        text.includes('spo2') ||
-        text.includes('o2')
-      )
-        return 'Oximeter';
-      return null;
-    },
-    [],
-  );
+  // Record each completed scale measurement as a time-series medical event so
+  // the Trends screen can chart weight/BMI over time.
+  useEffect(() => {
+    const profileId = activeProfileId;
+    if (!completedWeight || !profileId) return;
+    const key = `${profileId}:${completedWeight.ts}`;
+    if (weightEventKeyRef.current === key) return;
+    weightEventKeyRef.current = key;
+
+    const kg = completedWeight.kg;
+    // Use the profile height, or fall back to 160 cm when none is recorded.
+    const heightCm = medicalHeightCm && medicalHeightCm > 0 ? medicalHeightCm : DEFAULT_HEIGHT_CM;
+    const bmi = Number((kg / ((heightCm / 100) ** 2)).toFixed(1));
+    const comp = completedWeight.composition;
+    const deviceId = weightScaleDevices[0]?.device_id || 'ailink-scale';
+
+    (async () => {
+      const dataPayload = {
+        device_id: String(deviceId),
+        profile_id: profileId,
+        ts: Date.now(),
+        snapshot: {
+          type: 'weight',
+          kg,
+          bmi,
+          ...(comp?.fat != null ? { fat: comp.fat } : {}),
+          ...(comp?.muscle != null ? { muscle: comp.muscle } : {}),
+          ...(comp?.water != null ? { water: comp.water } : {}),
+          ...(comp?.protein != null ? { protein: comp.protein } : {}),
+          ...(comp?.visceral != null ? { visceral: comp.visceral } : {}),
+          ...(comp?.bmr != null ? { bmr: comp.bmr } : {}),
+          ...(comp?.bone != null ? { bone: comp.bone } : {}),
+          ...(comp?.bodyAge != null ? { bodyAge: comp.bodyAge } : {}),
+        },
+      };
+
+      try {
+        const token = await AsyncStorage.getItem('authToken');
+        if (!token) {
+          // No session yet (e.g. app just launched) — queue so the reading
+          // still reaches Trends once the user is signed in and online.
+          await enqueueMedicalData(dataPayload);
+          return;
+        }
+
+        if (!isOnlineSync()) {
+          await enqueueMedicalData(dataPayload);
+          return;
+        }
+
+        await sendMedicalData(token, dataPayload);
+      } catch {
+        // Upload failed (network/server issue) — queue for the outbox sync to
+        // retry, instead of silently dropping the reading from Trends.
+        try {
+          await enqueueMedicalData(dataPayload);
+        } catch {
+          // ignore queue failures too
+        }
+      }
+    })();
+
+    // Raise a Weight/BMI alert on the Alerts page (like the other vitals).
+    if (canUseMedicalDevices) {
+      recordBmiAlert({
+        profileId,
+        deviceId: String(deviceId),
+        kg,
+        bmi,
+        status: evaluateBmiStatus(bmi),
+        ts: Date.now(),
+        lang,
+      }).catch(() => {});
+    }
+  }, [completedWeight, activeProfileId, medicalHeightCm, weightScaleDevices, canUseMedicalDevices, lang]);
+
+  const getDeviceKind = useCallback((device: DeviceSummary): VitalKind | null => {
+    // Shared classifier: keywords + Yuwell model codes (e.g. BO-YX310 → Oximeter)
+    const kind = classifyVitalDeviceKind({
+      device_type: device.device_type,
+      device_name: device.device_name,
+      factory_name: device.factory_name,
+      display_name: device.display_name,
+      medical_device_type: (device as any).medical_device_type,
+      platform: (device as any).platform,
+    });
+    if (kind === 'Pressure' || kind === 'Glucose' || kind === 'Thermometer' || kind === 'Oximeter') {
+      return kind;
+    }
+    // Thermometers often advertise only "Yuwell" / a model code. If this
+    // device already produced a temp reading, treat it as the thermometer.
+    const readings = getReadingsForDevice(String(device.device_id || ''));
+    if (readings?.temp && (readings.temp.values?.c ?? readings.temp.values?.celsius ?? 0) > 0) {
+      return 'Thermometer';
+    }
+    return null;
+  }, [liveReadings]);
 
   const candidatesByKind = useMemo(() => {
     const grouped: Record<VitalKind, DeviceSummary[]> = {
@@ -1091,11 +1291,11 @@ const HomeScreen = React.memo(function HomeScreen({
   );
 
   const getLiveReadingForDevice = useCallback(
-    (device: DeviceSummary | null, kind: MeasurementKind) => {
+    (device: DeviceSummary | null, kind: MeasurementKind): LiveReading | null => {
       if (!device) return null;
-      const deviceId = String(device.device_id || '').trim().toUpperCase();
+      const deviceId = String(device.device_id || '').trim();
       if (!deviceId) return null;
-      return liveReadings.get(deviceId)?.[kind] || null;
+      return getReadingsForDevice(deviceId)?.[kind] || liveReadings.get(deviceId.toUpperCase())?.[kind] || null;
     },
     [liveReadings],
   );
@@ -1104,11 +1304,22 @@ const HomeScreen = React.memo(function HomeScreen({
     (kind: VitalKind, device: DeviceSummary | null): string | null => {
       if (kind === 'Pressure') return getLiveReadingForDevice(device, 'bp')?.text ?? null;
       if (kind === 'Glucose') return getLiveReadingForDevice(device, 'glucose')?.text ?? null;
-      if (kind === 'Thermometer') return getLiveReadingForDevice(device, 'temp')?.text ?? null;
       if (kind === 'Oximeter') return getLiveReadingForDevice(device, 'spo2')?.text ?? null;
+      if (kind === 'Thermometer') {
+        const fromDevice = getLiveReadingForDevice(device, 'temp')?.text;
+        if (fromDevice) return fromDevice;
+        // Trends iterates every device's temp reading — Home used to miss it
+        // when the thermometer wasn't classified or the MAC format differed.
+        const anyTemp = getLatestReadingOfKind('temp');
+        if (anyTemp?.text) return anyTemp.text;
+        if (persistedTempC != null && persistedTempC > 0) {
+          return `${persistedTempC.toFixed(1)}°C`;
+        }
+        return null;
+      }
       return null;
     },
-    [getLiveReadingForDevice],
+    [getLiveReadingForDevice, persistedTempC, liveReadings],
   );
 
   const splitVitalValue = useCallback((raw: string | null, separator: string) => {
@@ -1141,9 +1352,12 @@ const HomeScreen = React.memo(function HomeScreen({
       device: DeviceSummary | null,
     ): { status: HealthStatusLevel | null; hasDevice: boolean } => {
       if (!device) return { status: null, hasDevice: false };
-      const deviceId = String(device.device_id || '');
-      const deviceReadings = readings.get(deviceId);
-      const reading = deviceReadings?.[kind];
+      // liveReadings keys are uppercased MACs — match that, plus colon-less variants.
+      const deviceId = String(device.device_id || '').trim();
+      const reading =
+        getReadingsForDevice(deviceId)?.[kind] ||
+        readings.get(deviceId.toUpperCase())?.[kind] ||
+        (kind === 'temp' ? getLatestReadingOfKind('temp') : null);
       if (!reading?.values) return { status: null, hasDevice: true };
 
       switch (kind) {
@@ -1182,9 +1396,9 @@ const HomeScreen = React.memo(function HomeScreen({
           return { status: null, hasDevice: true };
         }
         case 'temp': {
-          const { c } = reading.values;
+          const c = Number(reading.values.c ?? reading.values.celsius);
           // Check for valid temperature values (celsius should be reasonable range)
-          if (c != null && c > 0) {
+          if (Number.isFinite(c) && c > 0) {
             return {
               status: evaluateTemperature({ celsius: c }),
               hasDevice: true,
@@ -1199,7 +1413,16 @@ const HomeScreen = React.memo(function HomeScreen({
 
     const bpResult = getHealthStatus('bp', pressure);
     const glucoseResult = getHealthStatus('glucose', glucose);
-    const tempResult = getHealthStatus('temp', temp);
+    const tempResult = temp
+      ? getHealthStatus('temp', temp)
+      : (() => {
+          const anyTemp = getLatestReadingOfKind('temp');
+          const c = Number(anyTemp?.values?.c ?? anyTemp?.values?.celsius ?? persistedTempC);
+          if (Number.isFinite(c) && c > 0) {
+            return { status: evaluateTemperature({ celsius: c }), hasDevice: true };
+          }
+          return { status: null, hasDevice: false };
+        })();
     const spo2Result = getHealthStatus('spo2', spo2);
 
     const statusToMetric = (result: {
@@ -1258,40 +1481,105 @@ const HomeScreen = React.memo(function HomeScreen({
     }
 
     return { overallStatus, message, metrics };
-  }, [pickDeviceForKind, liveReadings, lang]);
+  }, [pickDeviceForKind, liveReadings, lang, persistedTempC]);
 
   const activeAvatarSource = activeAvatar?.uri
     ? { uri: activeAvatar.uri }
     : undefined;
 
   const bmiValue = useMemo(() => {
-    if (lastWeightKg == null || medicalHeightCm == null || medicalHeightCm <= 0) {
-      return null;
-    }
-
-    const heightM = medicalHeightCm / 100;
-    if (!Number.isFinite(heightM) || heightM <= 0) return null;
-
+    if (lastWeightKg == null) return null;
+    // Use the profile height, or fall back to 160 cm when none is recorded.
+    const cm = medicalHeightCm && medicalHeightCm > 0 ? medicalHeightCm : DEFAULT_HEIGHT_CM;
+    const heightM = cm / 100;
     const bmi = lastWeightKg / (heightM * heightM);
     if (!Number.isFinite(bmi) || bmi <= 0) return null;
     return bmi;
   }, [lastWeightKg, medicalHeightCm]);
 
+  // Prefer the accurate height-derived BMI; fall back to the scale's onboard BMI
+  // (from the last completed measurement) so a value still shows when the profile
+  // height hasn't loaded yet or isn't set.
+  const effectiveBmi = useMemo(() => {
+    if (bmiValue != null) return bmiValue;
+    const sb = completedWeight?.scaleBmi;
+    return sb != null && sb > 0 ? sb : null;
+  }, [bmiValue, completedWeight]);
+
+  // Prefer the freshly-measured composition; fall back to the server's latest
+  // recorded body composition so the card shows it after a reload too.
+  const displayComposition = useMemo<ScaleComposition | null>(() => {
+    if (bodyComposition) return bodyComposition;
+    const l = homeLatestWeightBmi;
+    if (!l) return null;
+    const c: ScaleComposition = {
+      fat: l.fatPct ?? null,
+      muscle: l.musclePct ?? null,
+      water: l.waterPct ?? null,
+      protein: l.proteinPct ?? null,
+      visceral: l.visceralFat ?? null,
+      bmr: l.bmr ?? null,
+      bone: l.boneMassKg ?? null,
+      bodyAge: l.bodyAge ?? null,
+    };
+    return Object.values(c).some((v) => v != null) ? c : null;
+  }, [bodyComposition, homeLatestWeightBmi]);
+
   const bmiStatus = useMemo<HealthStatusLevel | null>(() => {
-    if (bmiValue == null) return null;
-    return evaluateBmiStatus(bmiValue);
-  }, [bmiValue]);
+    if (effectiveBmi == null) return null;
+    return evaluateBmiStatus(effectiveBmi);
+  }, [effectiveBmi]);
 
   const weightCardColor = useMemo(() => {
     if (!bmiStatus) return null;
     return getStatusColor(bmiStatus);
   }, [bmiStatus]);
 
-  useEffect(() => {
-    console.log('[home] weight card inputs → lastWeightKg=', lastWeightKg,
-      'heightCm=', medicalHeightCm, 'bmi=', bmiValue,
-      'connected=', weightScaleConnected, 'devices=', weightScaleDevices.length);
-  }, [lastWeightKg, medicalHeightCm, bmiValue, weightScaleConnected, weightScaleDevices]);
+  // ---- clear / retake measurements ----------------------------------------
+  // Clearing only hides the on-screen value (resets the local live reading /
+  // weight state) so the user can retake it. Saved server history (Trends) is
+  // untouched.
+  const clearWeightMeasurement = useCallback(() => {
+    setLastWeightKg(null);
+    setCompletedWeight(null);
+    setWeightScaleName(null);
+    weightEventKeyRef.current = '';
+    lastWeightSyncKeyRef.current = '';
+    const pid = activeProfileId;
+    if (pid) AsyncStorage.removeItem(`homeLastWeight.v1.${pid}`).catch(() => {});
+  }, [activeProfileId]);
+
+  const confirmClear = useCallback(
+    (onConfirm: () => void) => {
+      Alert.alert(
+        t(lang, 'clear_reading_title'),
+        t(lang, 'clear_reading_message'),
+        [
+          { text: t(lang, 'cancel'), style: 'cancel' },
+          { text: t(lang, 'clear'), style: 'destructive', onPress: onConfirm },
+        ],
+      );
+    },
+    [lang],
+  );
+
+  const confirmClearAll = useCallback(() => {
+    Alert.alert(
+      t(lang, 'clear_all_title'),
+      t(lang, 'clear_all_message'),
+      [
+        { text: t(lang, 'cancel'), style: 'cancel' },
+        {
+          text: t(lang, 'clear'),
+          style: 'destructive',
+          onPress: () => {
+            clearAllLiveReadings();
+            clearWeightMeasurement();
+          },
+        },
+      ],
+    );
+  }, [lang, clearWeightMeasurement]);
 
   const vitalCards = useMemo<HomeVitalCardItem[]>(() => {
     const pressure = pickDeviceForKind('Pressure');
@@ -1334,6 +1622,9 @@ const HomeScreen = React.memo(function HomeScreen({
         hasMultipleDevices: (candidatesByKind.Pressure || []).length > 1,
         locked: !canUseMedicalDevices,
         onPress: () => openCardAction('Pressure'),
+        onLongPress: pressure
+          ? () => confirmClear(() => clearLiveReadingKind(pressure.device_id ?? '', 'bp'))
+          : undefined,
       },
       {
         id: 'glucose',
@@ -1351,6 +1642,9 @@ const HomeScreen = React.memo(function HomeScreen({
         hasMultipleDevices: (candidatesByKind.Glucose || []).length > 1,
         locked: !canUseMedicalDevices,
         onPress: () => openCardAction('Glucose'),
+        onLongPress: glucose
+          ? () => confirmClear(() => clearLiveReadingKind(glucose.device_id ?? '', 'glucose'))
+          : undefined,
       },
       {
         id: 'temperature',
@@ -1360,11 +1654,14 @@ const HomeScreen = React.memo(function HomeScreen({
           temp?.display_name || temp?.device_name || temp?.factory_name || null,
         valueText: getVitalValue('Thermometer', temp),
         valueLine2: null,
-        hasDevice: !!temp,
+        hasDevice: !!temp || getLatestReadingOfKind('temp') != null || persistedTempC != null,
         isConnected: tempConnected,
         hasMultipleDevices: (candidatesByKind.Thermometer || []).length > 1,
         locked: !canUseMedicalDevices,
         onPress: () => openCardAction('Thermometer'),
+        onLongPress: temp
+          ? () => confirmClear(() => clearLiveReadingKind(temp.device_id ?? '', 'temp'))
+          : undefined,
       },
       {
         id: 'oxygen',
@@ -1379,6 +1676,9 @@ const HomeScreen = React.memo(function HomeScreen({
         hasMultipleDevices: (candidatesByKind.Oximeter || []).length > 1,
         locked: !canUseMedicalDevices,
         onPress: () => openCardAction('Oximeter'),
+        onLongPress: spo2
+          ? () => confirmClear(() => clearLiveReadingKind(spo2.device_id ?? '', 'spo2'))
+          : undefined,
       },
       // Weight scale (AILink SDK — standalone, not BLE device system)
       {
@@ -1391,16 +1691,13 @@ const HomeScreen = React.memo(function HomeScreen({
           weightScaleDevice?.device_name ||
           weightScaleDevice?.factory_name ||
           null,
-        valueText: bmiValue != null ? `${bmiValue.toFixed(1)}` : null,
+        valueText: effectiveBmi != null ? `${effectiveBmi.toFixed(1)}` : null,
         valueLine2:
           lastWeightKg != null
             ? `${lastWeightKg.toFixed(1)} ${t(lang, 'weight_kg_suffix')}`
             : null,
         accentColor: weightCardColor,
-        bmiHintText:
-          lastWeightKg != null && (medicalHeightCm == null || medicalHeightCm <= 0)
-            ? t(lang, 'weight_bmi_requires_height')
-            : null,
+        composition: displayComposition,
         hasDevice:
           !!weightScaleDevice || lastWeightKg != null || weightScaleConnected,
         isConnected: weightScaleConnected,
@@ -1411,22 +1708,12 @@ const HomeScreen = React.memo(function HomeScreen({
             setDeviceConsentDialogVisible(true);
             return;
           }
-          navigateTo('Devices');
+          setWeightDetailOpen(true);
         },
-      },
-      // Yuwell CGM (continuous glucose) — placeholder for future API integration.
-      {
-        id: 'cgm',
-        title: t(lang, 'cgm_title'),
-        icon: require('../../../../assets/android-res/drawable/glucose_monitor.png'),
-        deviceName: t(lang, 'coming_soon'),
-        valueText: null,
-        valueLine2: null,
-        hasDevice: false,
-        isConnected: false,
-        hasMultipleDevices: false,
-        locked: !canUseMedicalDevices,
-        onPress: () => showToast(t(lang, 'cgm_coming_soon'), 'info'),
+        onLongPress:
+          lastWeightKg != null || effectiveBmi != null
+            ? () => confirmClear(clearWeightMeasurement)
+            : undefined,
       },
     ];
   }, [
@@ -1438,10 +1725,11 @@ const HomeScreen = React.memo(function HomeScreen({
     getDeviceConnectionStatus,
     getVitalValue,
     lang,
-    bmiValue,
+    effectiveBmi,
     medicalHeightCm,
     weightCardColor,
     lastWeightKg,
+    displayComposition,
     weightScaleName,
     weightScaleConnected,
     weightScaleDevices,
@@ -1449,6 +1737,10 @@ const HomeScreen = React.memo(function HomeScreen({
     openCardAction,
     pickDeviceForKind,
     splitVitalValue,
+    confirmClear,
+    clearWeightMeasurement,
+    persistedTempC,
+    liveReadings,
   ]);
 
   const [savedAvatarColor, setSavedAvatarColor] = useState<string | null>(null);
@@ -1622,6 +1914,23 @@ const HomeScreen = React.memo(function HomeScreen({
     activeAvatarSource,
     initials,
   ]);
+
+  // Full-page weight history: replace Home UI entirely so the blue profile
+  // header can never cover the Back button (see SpO2 detail chrome).
+  if (weightDetailOpen) {
+    return (
+      <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
+        <StatusBar barStyle="dark-content" backgroundColor={Colors.background} />
+        <WeightDetailOverlay
+          visible
+          mode="page"
+          onClose={closeWeightDetail}
+          profileId={activeProfileId}
+          latest={homeLatestWeightBmi}
+        />
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
@@ -2085,9 +2394,24 @@ const HomeScreen = React.memo(function HomeScreen({
             isTabletWidth && styles.bodyTablet,
           ]}
         >
-          {/* Vitals cards */}
+          {/* Clear readings — hides current values so a fresh measurement can be
+              retaken (saved history is untouched). Long-press a single card to
+              clear just that one. */}
+          {canUseMedicalDevices ? (
+            <TouchableOpacity
+              onPress={confirmClearAll}
+              style={{ alignSelf: 'flex-end', paddingVertical: 6, paddingHorizontal: 4, marginBottom: 4 }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={{ color: Colors.primary, fontSize: 13, fontWeight: '600' }}>
+                {t(lang, 'clear_readings')}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
+          {/* Vitals cards (weight/BMI card is now driven by our AILink adapter) */}
           <HomeVitalsGrid
-            cards={vitalCards.filter(card => card.id !== 'weight')}
+            cards={vitalCards}
           />
 
           {/* Health Trend Widget */}
