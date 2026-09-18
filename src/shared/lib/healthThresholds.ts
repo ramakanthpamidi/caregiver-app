@@ -472,7 +472,9 @@ export function formatReadingText(type: 'bp' | 'spo2' | 'glucose' | 'temp' | 'bm
       return Number.isFinite(celsius) ? `${celsius.toFixed(1)}°C` : '';
     }
     case 'bmi':
-      return values.kg ? `BMI ${values.bmi} • ${values.kg} kg` : `BMI ${values.bmi}`;
+      return Number.isFinite(values.kg) && values.kg > 0
+        ? `BMI ${values.bmi} • ${values.kg} kg`
+        : `BMI ${values.bmi}`;
   }
 }
 

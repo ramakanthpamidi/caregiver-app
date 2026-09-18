@@ -86,6 +86,20 @@ function splitReading(
     }
   }
 
+  if (readingType === 'bmi') {
+    // formatReadingText's 'bmi' case produces "BMI 24.3 • 68.5 kg" (or
+    // just "BMI 24.3" without a weight) — it starts with letters, so the
+    // generic digit-first regex below never matches it.
+    const bmiMatch = trimmed.match(/^BMI\s+([0-9.]+)(?:\s*•\s*(.*))?$/i);
+    if (bmiMatch) {
+      return {
+        value: bmiMatch[1] || '--',
+        unit: 'BMI',
+        detail: bmiMatch[2] || '',
+      };
+    }
+  }
+
   const match = trimmed.match(/^([0-9./]+)\s*(.*)$/);
   if (!match) return { value: trimmed, unit: '', detail: '' };
 

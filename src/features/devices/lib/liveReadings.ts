@@ -128,6 +128,28 @@ export function clearAllLiveReadings() {
   scheduleSave();
 }
 
+/**
+ * Clear only the readings for the given device ids. readingsByDevice is a
+ * module-level singleton shared across every patient profile in the app (it
+ * is keyed only by device MAC, with no profile scoping), so a caregiver
+ * viewing one profile clearing "this patient's" readings must not wipe
+ * another profile's cached live vitals — prefer this over clearAllLiveReadings
+ * whenever the caller knows which devices belong to the current profile.
+ */
+export function clearLiveReadingsForDevices(deviceIds: Array<string | null | undefined>) {
+  let changed = false;
+  for (const id of deviceIds) {
+    if (!id) continue;
+    for (const key of deviceIdKeys(id)) {
+      if (readingsByDevice.delete(key)) changed = true;
+    }
+  }
+  if (changed) {
+    emit();
+    scheduleSave();
+  }
+}
+
 /** Clear a single measurement kind for one device (e.g. hide just the BP card). */
 export function clearLiveReadingKind(deviceId: string, kind: MeasurementKind) {
   let changed = false;

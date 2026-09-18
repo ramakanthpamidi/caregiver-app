@@ -1,6 +1,9 @@
 package expo.modules.icomonscale
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -80,6 +83,21 @@ class IcomonScaleModule : Module() {
   private fun cancelScanTimeout() {
     scanTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
     scanTimeoutRunnable = null
+  }
+
+  // On Android 12+ (API 31), connecting/scanning via the vendor BLE stack
+  // requires BLUETOOTH_CONNECT / BLUETOOTH_SCAN at runtime, same as the JS
+  // ble-plx scan path. Unlike that path, the ICDeviceManager SDK calls below
+  // (addDevice/scanDevice) are not wrapped by Expo's own permission gate, and
+  // this module can be driven by the always-on device monitor before the user
+  // ever opens the Add Device screen (the only place that currently requests
+  // these permissions) — so check explicitly instead of letting a missing
+  // grant surface as an uncaught SecurityException from the native SDK.
+  private fun hasBlePermissions(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+    val connect = context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    val scan = context.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+    return connect == PackageManager.PERMISSION_GRANTED && scan == PackageManager.PERMISSION_GRANTED
   }
 
   // Shared by onReceiveWeightData (plain weight/BMI scales) and
@@ -206,19 +224,28 @@ class IcomonScaleModule : Module() {
   }
 
   private fun connectTo(mac: String) {
-    val device = ICDevice()
-    device.setMacAddr(mac)
-    lastKnownDevice = device
-    ICDeviceManager.shared().addDevice(device, object : ICConstant.ICAddDeviceCallBack {
-      override fun onCallBack(device: ICDevice?, code: ICConstant.ICAddDeviceCallBackCode?) {
-        Log.d(TAG, "addDevice callback: mac=${device?.getMacAddr()} code=$code")
-        if (!sessionActive) return
-        if (code != ICConstant.ICAddDeviceCallBackCode.ICAddDeviceCallBackCodeSuccess) {
-          connecting = false
-          emit("type" to "error", "message" to "Could not connect to the scale ($code). Please try again.")
+    try {
+      val device = ICDevice()
+      device.setMacAddr(mac)
+      lastKnownDevice = device
+      ICDeviceManager.shared().addDevice(device, object : ICConstant.ICAddDeviceCallBack {
+        override fun onCallBack(device: ICDevice?, code: ICConstant.ICAddDeviceCallBackCode?) {
+          Log.d(TAG, "addDevice callback: mac=${device?.getMacAddr()} code=$code")
+          if (!sessionActive) return
+          if (code != ICConstant.ICAddDeviceCallBackCode.ICAddDeviceCallBackCodeSuccess) {
+            connecting = false
+            emit("type" to "error", "message" to "Could not connect to the scale ($code). Please try again.")
+          }
         }
-      }
-    })
+      })
+    } catch (e: SecurityException) {
+      // Permission revoked between the start()-time check and now (e.g. user
+      // pulled Bluetooth permission from Settings mid-session) — fail the
+      // connect gracefully instead of crashing the app.
+      Log.d(TAG, "connectTo: SecurityException, mac=$mac", e)
+      connecting = false
+      emit("type" to "error", "message" to "Bluetooth permission is required to connect to the scale.")
+    }
   }
 
   private val scanDelegate = object : ICScanDeviceDelegate {
@@ -379,6 +406,12 @@ class IcomonScaleModule : Module() {
         promise.reject("E_NO_CONTEXT", "Android context unavailable", null)
         return@AsyncFunction
       }
+      if (!hasBlePermissions(context)) {
+        Log.d(TAG, "start(): missing BLUETOOTH_CONNECT/BLUETOOTH_SCAN — refusing to touch the native SDK")
+        emit("type" to "error", "message" to "Bluetooth permission is required to connect to the scale.")
+        promise.resolve(null)
+        return@AsyncFunction
+      }
       sessionActive = true
       connecting = false
       finished = false
@@ -405,7 +438,13 @@ class IcomonScaleModule : Module() {
           } else {
             Log.d(TAG, "start(): calling scanDevice(), timeout=${scanTimeoutMs}ms")
             emit("type" to "scanning")
-            ICDeviceManager.shared().scanDevice(scanDelegate)
+            try {
+              ICDeviceManager.shared().scanDevice(scanDelegate)
+            } catch (e: SecurityException) {
+              Log.d(TAG, "start(): SecurityException from scanDevice()", e)
+              emit("type" to "error", "message" to "Bluetooth permission is required to connect to the scale.")
+              return@removeKnownDevice
+            }
             val timeout = Runnable {
               Log.d(TAG, "scan timeout fired: sessionActive=$sessionActive connecting=$connecting")
               if (sessionActive && !connecting) {

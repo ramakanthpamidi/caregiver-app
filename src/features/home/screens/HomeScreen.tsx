@@ -43,6 +43,7 @@ import {
 import {
   useLiveReadings,
   clearAllLiveReadings,
+  clearLiveReadingsForDevices,
   clearLiveReadingKind,
   getLatestReadingOfKind,
   getReadingsForDevice,
@@ -52,7 +53,7 @@ import {
 import { loadPersistedLiveReadings } from '../../devices/storage/persistedLiveReadings';
 import { classifyVitalDeviceKind } from '../../devices/lib/deviceKind';
 import { recordBmiAlert } from '../../alerts/lib/bmiAlert';
-import { DEFAULT_HEIGHT_CM, useLatestWeightBmi } from '../../trends/lib/weightBmi';
+import { useLatestWeightBmi } from '../../trends/lib/weightBmi';
 import WeightDetailOverlay from '../../trends/components/WeightDetailOverlay';
 import { getCachedProfiles } from '../../profiles/storage/profileCache';
 import { isDeviceMarkedConnected } from '../../devices/lib/bleManager';
@@ -387,6 +388,21 @@ const HomeScreen = React.memo(function HomeScreen({
     useTabNavigationActions();
   const [headerHeight, setHeaderHeight] = useState<number>(0);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
+  // Kept in sync so the clear-readings handlers below (some registered inside
+  // effects that don't re-run per render) always see the current profile's
+  // device list instead of a stale closure.
+  const devicesRef = useRef<DeviceSummary[]>([]);
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+  // readingsByDevice (liveReadings.ts) is a single global store shared across
+  // every patient profile — clear only the active profile's own devices so we
+  // never wipe another profile's cached live vitals out from under it.
+  const clearOwnLiveReadings = useCallback(() => {
+    const ids = devicesRef.current.map((d) => d.device_id).filter(Boolean);
+    if (ids.length > 0) clearLiveReadingsForDevices(ids);
+    else clearAllLiveReadings();
+  }, []);
   const [activeProfileName, setActiveProfileName] = useState<string | null>(
     null,
   ); // null = loading
@@ -683,11 +699,13 @@ const HomeScreen = React.memo(function HomeScreen({
     StatusBar.currentHeight || 0,
   );
 
-  // If device consent is revoked, immediately clear any live data shown on Home.
+  // If device consent is revoked, immediately clear any live data shown on Home
+  // (scoped to this profile's own devices — other profiles' cached readings
+  // must not be affected).
   useEffect(() => {
     if (canUseMedicalDevices) return;
-    clearAllLiveReadings();
-  }, [canUseMedicalDevices]);
+    clearOwnLiveReadings();
+  }, [canUseMedicalDevices, clearOwnLiveReadings]);
 
   // cause rerender when readings update and get live readings snapshot
   const liveReadings = useLiveReadings();
@@ -768,8 +786,10 @@ const HomeScreen = React.memo(function HomeScreen({
     refreshActiveProfileFromCache();
 
     const unsub1 = subscribeActiveProfileId(id => {
-      // Clear live readings when profile changes
-      clearAllLiveReadings();
+      // Clear live readings for the profile we're leaving (devicesRef still
+      // holds its device list at this point) so its stale cards don't flash
+      // on screen before the new profile's devices/readings load in.
+      clearOwnLiveReadings();
       void refreshActiveProfileFromCache(id);
     });
     const unsub2 = subscribeProfilesUpdated(() => {
@@ -1105,9 +1125,20 @@ const HomeScreen = React.memo(function HomeScreen({
     weightEventKeyRef.current = key;
 
     const kg = completedWeight.kg;
-    // Use the profile height, or fall back to 160 cm when none is recorded.
-    const heightCm = medicalHeightCm && medicalHeightCm > 0 ? medicalHeightCm : DEFAULT_HEIGHT_CM;
-    const bmi = Number((kg / ((heightCm / 100) ** 2)).toFixed(1));
+    // Only compute a height-derived BMI when the profile has a real recorded
+    // height. Silently assuming a fixed 160cm for every profile without one
+    // produces a wrong BMI that gets permanently stored in Trends history and
+    // can trigger a false — or mask a genuinely critical — BMI alert. Fall
+    // back to the scale's own onboard BMI estimate (it has its own height
+    // input) instead, and skip BMI entirely if neither is available.
+    const hasRealHeight = medicalHeightCm != null && medicalHeightCm > 0;
+    const scaleBmi =
+      completedWeight.scaleBmi != null && completedWeight.scaleBmi > 0
+        ? Number(completedWeight.scaleBmi.toFixed(1))
+        : null;
+    const bmi = hasRealHeight
+      ? Number((kg / ((medicalHeightCm / 100) ** 2)).toFixed(1))
+      : scaleBmi;
     const comp = completedWeight.composition;
     const deviceId = weightScaleDevices[0]?.device_id || 'ailink-scale';
 
@@ -1119,7 +1150,7 @@ const HomeScreen = React.memo(function HomeScreen({
         snapshot: {
           type: 'weight',
           kg,
-          bmi,
+          ...(bmi != null ? { bmi } : {}),
           ...(comp?.fat != null ? { fat: comp.fat } : {}),
           ...(comp?.muscle != null ? { muscle: comp.muscle } : {}),
           ...(comp?.water != null ? { water: comp.water } : {}),
@@ -1158,7 +1189,9 @@ const HomeScreen = React.memo(function HomeScreen({
     })();
 
     // Raise a Weight/BMI alert on the Alerts page (like the other vitals).
-    if (canUseMedicalDevices) {
+    // Skip when we have no real BMI (no recorded height and no scale
+    // estimate) rather than alerting on a fabricated-height guess.
+    if (canUseMedicalDevices && bmi != null) {
       recordBmiAlert({
         profileId,
         deviceId: String(deviceId),
@@ -1310,16 +1343,21 @@ const HomeScreen = React.memo(function HomeScreen({
         if (fromDevice) return fromDevice;
         // Trends iterates every device's temp reading — Home used to miss it
         // when the thermometer wasn't classified or the MAC format differed.
-        const anyTemp = getLatestReadingOfKind('temp');
-        if (anyTemp?.text) return anyTemp.text;
-        if (persistedTempC != null && persistedTempC > 0) {
-          return `${persistedTempC.toFixed(1)}°C`;
+        // Only safe when there's a single thermometer registered — with two+
+        // paired, attributing "any device's" reading to this specific card
+        // would show the wrong device's value under this device's name.
+        if ((candidatesByKind.Thermometer?.length ?? 0) <= 1) {
+          const anyTemp = getLatestReadingOfKind('temp');
+          if (anyTemp?.text) return anyTemp.text;
+          if (persistedTempC != null && persistedTempC > 0) {
+            return `${persistedTempC.toFixed(1)}°C`;
+          }
         }
         return null;
       }
       return null;
     },
-    [getLiveReadingForDevice, persistedTempC, liveReadings],
+    [getLiveReadingForDevice, persistedTempC, liveReadings, candidatesByKind],
   );
 
   const splitVitalValue = useCallback((raw: string | null, separator: string) => {
@@ -1354,10 +1392,14 @@ const HomeScreen = React.memo(function HomeScreen({
       if (!device) return { status: null, hasDevice: false };
       // liveReadings keys are uppercased MACs — match that, plus colon-less variants.
       const deviceId = String(device.device_id || '').trim();
+      // Only fall back to "any device's" temp reading when there's a single
+      // thermometer registered — otherwise this device's card could show a
+      // status derived from a different, specifically-paired thermometer.
+      const singleThermometer = (candidatesByKind.Thermometer?.length ?? 0) <= 1;
       const reading =
         getReadingsForDevice(deviceId)?.[kind] ||
         readings.get(deviceId.toUpperCase())?.[kind] ||
-        (kind === 'temp' ? getLatestReadingOfKind('temp') : null);
+        (kind === 'temp' && singleThermometer ? getLatestReadingOfKind('temp') : null);
       if (!reading?.values) return { status: null, hasDevice: true };
 
       switch (kind) {
@@ -1481,7 +1523,7 @@ const HomeScreen = React.memo(function HomeScreen({
     }
 
     return { overallStatus, message, metrics };
-  }, [pickDeviceForKind, liveReadings, lang, persistedTempC]);
+  }, [pickDeviceForKind, liveReadings, lang, persistedTempC, candidatesByKind]);
 
   const activeAvatarSource = activeAvatar?.uri
     ? { uri: activeAvatar.uri }
@@ -1489,9 +1531,12 @@ const HomeScreen = React.memo(function HomeScreen({
 
   const bmiValue = useMemo(() => {
     if (lastWeightKg == null) return null;
-    // Use the profile height, or fall back to 160 cm when none is recorded.
-    const cm = medicalHeightCm && medicalHeightCm > 0 ? medicalHeightCm : DEFAULT_HEIGHT_CM;
-    const heightM = cm / 100;
+    // Only derive BMI from height when the profile actually has one recorded.
+    // Silently assuming DEFAULT_HEIGHT_CM here would show a confident-looking
+    // but fabricated number; effectiveBmi below falls back to the scale's own
+    // onboard BMI estimate instead when this is null.
+    if (!medicalHeightCm || medicalHeightCm <= 0) return null;
+    const heightM = medicalHeightCm / 100;
     const bmi = lastWeightKg / (heightM * heightM);
     if (!Number.isFinite(bmi) || bmi <= 0) return null;
     return bmi;
@@ -1543,6 +1588,10 @@ const HomeScreen = React.memo(function HomeScreen({
     setLastWeightKg(null);
     setCompletedWeight(null);
     setWeightScaleName(null);
+    // Also drop the body-fat/muscle/water/etc. composition chips — otherwise
+    // they keep showing the previous measurement's numbers underneath the
+    // now-blank weight/BMI values.
+    setBodyComposition(null);
     weightEventKeyRef.current = '';
     lastWeightSyncKeyRef.current = '';
     const pid = activeProfileId;
@@ -1573,7 +1622,7 @@ const HomeScreen = React.memo(function HomeScreen({
           text: t(lang, 'clear'),
           style: 'destructive',
           onPress: () => {
-            clearAllLiveReadings();
+            clearOwnLiveReadings();
             clearWeightMeasurement();
           },
         },

@@ -132,10 +132,15 @@ export function notifyIcomonDeviceSeen(mac: string) {
   emit({ type: 'connecting', mac });
   native.start?.(mac, 30000);
 
-  // Watchdog: if the connect doesn't land (no 'connected' event), release the
-  // guard so the next advertisement can retry instead of getting stuck.
+  // Watchdog: if the connect doesn't land (no 'connected' event), abort the
+  // stalled attempt and release the guard so the next advertisement can retry.
+  // Just clearing the flag without stopping the native session would let the
+  // next retry's native.start() race the still in-flight first attempt.
   if (connectWatchdog) clearTimeout(connectWatchdog);
-  connectWatchdog = setTimeout(() => { connectInFlight = false; }, 15000);
+  connectWatchdog = setTimeout(() => {
+    connectInFlight = false;
+    try { getScaleNative()?.stop?.(); } catch { /* ignore */ }
+  }, 15000);
 }
 
 export function startIcomonMonitoring(options: {

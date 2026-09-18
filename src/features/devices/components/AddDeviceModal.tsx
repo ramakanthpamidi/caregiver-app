@@ -83,7 +83,9 @@ function isIcomonDevice(device: BleDevice): boolean {
   // "MY_SCALE" (with underscore/space/hyphen or none) is this vendor's generic
   // factory-renamed advertising name — recognize it even when the scan result
   // doesn't carry the service UUID (advertisement vs. scan-response packet).
-  return name.includes('icomon') || name.includes('welland') || /my[\s_-]?scale/.test(name);
+  // Anchored to word boundaries so it doesn't match "my" + "scale" as a
+  // substring inside an unrelated device name (e.g. "FamyScale").
+  return name.includes('icomon') || name.includes('welland') || /\bmy[\s_-]?scale\b/.test(name);
 }
 
 function isSupportedDevice(device: BleDevice): boolean {
@@ -206,6 +208,11 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
   const pruneIntervalRef = useRef<number | null>(null);
   const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveInFlightRef = useRef<Set<string>>(new Set());
+  // Once a Yuwell catalog lookup has been attempted for a name, never retry it
+  // for the rest of this scan — resolveInFlightRef alone isn't enough since it
+  // clears as soon as the request settles, and the heuristic-name-changed check
+  // below never trips when the catalog result matches the heuristic guess.
+  const resolveAttemptedRef = useRef<Set<string>>(new Set());
   // Bumps on every start/stop so stale scan callbacks cannot revive a finished session.
   const scanGenerationRef = useRef(0);
   const SCAN_DURATION_MS = 25_000;
@@ -392,6 +399,7 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
 
     // clear buffers and start scanning; buffer discoveries then flush at intervals
     foundBufferRef.current = {};
+    resolveAttemptedRef.current.clear();
     setFound({});
     setScanning(true);
     clearScanTimers();
@@ -527,7 +535,13 @@ export default function AddDeviceModal({ visible, onRequestClose, onDeviceAdded 
       // Already have a catalog/heuristic name — optional upgrade via cache only.
       if (existing?.displayName && existing.displayName !== heuristicDisplay) return;
 
+      // Resolve each distinct BLE name against the catalog at most once per
+      // scan, whether or not the lookup found anything different from the
+      // heuristic guess — otherwise this re-fires on every advertisement
+      // (allowDuplicates scan) for the whole session.
+      if (resolveAttemptedRef.current.has(bleName)) return;
       if (resolveInFlightRef.current.has(bleName)) return;
+      resolveAttemptedRef.current.add(bleName);
       resolveInFlightRef.current.add(bleName);
 
       (async () => {
