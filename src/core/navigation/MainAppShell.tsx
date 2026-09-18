@@ -60,8 +60,9 @@ import DataManagementOverlay from '../../features/profiles/components/DataManage
 import LineNotifyOverlay from '../../features/profiles/components/LineNotifyOverlay';
 import AppLoadingScreen from '../../shared/components/AppLoadingScreen';
 import DialogFrame from '../../shared/components/DialogFrame';
+import { apiUrl } from '../../shared/config/api';
 
-const APP_UPDATE_ENDPOINT = 'https://bpscaregiver.com/app-config';
+const APP_UPDATE_ENDPOINT = apiUrl('/app-config');
 const APP_UPDATE_IGNORE_KEY = 'appUpdateIgnoredVersion.v1';
 const APP_VERSION = (() => {
   try {

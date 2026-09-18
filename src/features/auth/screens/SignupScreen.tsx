@@ -13,7 +13,7 @@ import { facebookBackendAuthenticate, facebookSignInGetProfile, facebookSignOutI
 import { lineBackendAuthenticate, lineSignInGetProfile, lineSignOutIfPossible } from '../../profiles/services/lineAuth';
 import { useAuthActions } from '../state/authContext';
 import { useOnboardingDraft } from '../../../shared/contexts/onboardingDraftContext';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 import LanguageDropdown from '../../../shared/components/LanguageDropdown';
 import { useLanguage } from '../../../shared/i18n/LanguageContext';
 import { t } from '../../../shared/i18n';
@@ -627,7 +627,7 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
     }
 
     setLoading(true);
-    const signupUrl = apiUrl('/users');
+    const signupUrl = authApiUrl('/users');
     try {
       if (__DEV__) {
         console.log('[signup] POST', signupUrl);
@@ -679,8 +679,10 @@ const SignupScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({ setI
     } catch (err: any) {
       const baseMsg = err && err.message ? err.message : 'Signup failed';
       // RN surfaces offline/unreachable hosts as a generic "Network request failed".
+      // Only append the backend URL in dev builds — production users should
+      // never see the API host in a UI error message.
       const msg =
-        /network request failed/i.test(baseMsg) || /failed to fetch/i.test(baseMsg)
+        __DEV__ && (/network request failed/i.test(baseMsg) || /failed to fetch/i.test(baseMsg))
           ? `${baseMsg}\n(${signupUrl})`
           : baseMsg;
       if (__DEV__) {

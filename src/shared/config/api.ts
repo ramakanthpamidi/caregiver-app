@@ -39,14 +39,22 @@ export const API_BASE_URL =
   (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_API_BASE_URL) ||
   (__DEV__ ? LOCAL_API_BASE_URL : PROD_API_BASE_URL);
 
+function joinUrl(base: string, path: string): string {
+  if (!path) return base;
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  const prefix = path.startsWith('/') ? '' : '/';
+  return `${base}${prefix}${path}`;
+}
+
 /**
  * Build a full API URL from a path.
  * - Accepts `/auth/login` or `auth/login`
  * - Passes through fully-qualified URLs unchanged
  */
 export function apiUrl(path: string): string {
-  if (!path) return API_BASE_URL;
-  if (path.startsWith('http://') || path.startsWith('https://')) return path;
-  const prefix = path.startsWith('/') ? '' : '/';
-  return `${API_BASE_URL}${prefix}${path}`;
+  return joinUrl(API_BASE_URL, path);
+}
+
+export function authApiUrl(path: string): string {
+  return apiUrl(path);
 }

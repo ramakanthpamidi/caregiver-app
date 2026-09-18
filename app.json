@@ -17,8 +17,7 @@
         "NSLocationWhenInUseUsageDescription": "Location is required for Bluetooth scanning on some devices.",
         "NSPhotoLibraryUsageDescription": "This app needs photo access to set profile pictures.",
         "NSAppTransportSecurity": {
-          "NSAllowsLocalNetworking": true,
-          "NSAllowsArbitraryLoads": true
+          "NSAllowsLocalNetworking": true
         },
         "SKAdNetworkItems": [
           {

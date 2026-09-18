@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, KeyboardAvoidingView, Platform } from 're
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuthActions } from '../state/authContext';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 import InfoDialog from '../../../shared/components/InfoDialog';
 import Button from '../../../shared/components/Button';
 import InputField from '../../../shared/components/InputField';
@@ -62,7 +62,7 @@ const VerifyEmailScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({
 
     setLoading(true);
     try {
-      const resp = await fetch(apiUrl('/auth/verify-email'), {
+      const resp = await fetch(authApiUrl('/auth/verify-email'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, code: codeValue }),
@@ -107,7 +107,7 @@ const VerifyEmailScreen: React.FC<{ setIsLoggedIn?: (v: boolean) => void }> = ({
 
     setResendLoading(true);
     try {
-      const resp = await fetch(apiUrl('/auth/resend-verification'), {
+      const resp = await fetch(authApiUrl('/auth/resend-verification'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),

@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Line from '@xmartlabs/react-native-line';
 
 import { LINE_CHANNEL_ID } from '../../../shared/config/line';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 
 export type LineProfile = {
   accessToken: string;
@@ -94,7 +94,7 @@ export async function lineBackendAuthenticate(params: {
   mode?: 'login' | 'signup';
 }): Promise<LineBackendAuthResult> {
   const mode = params.mode || 'signup';
-  const resp = await fetch(apiUrl('/auth/line'), {
+  const resp = await fetch(authApiUrl('/auth/line'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ access_token: params.accessToken, user_label: params.userLabel, mode }),

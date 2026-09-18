@@ -36,7 +36,7 @@ import {
 } from '../../profiles/services/lineAuth';
 import { useAuthActions } from '../state/authContext';
 import { useOnboardingDraft } from '../../../shared/contexts/onboardingDraftContext';
-import { apiUrl } from '../../../shared/config/api';
+import { authApiUrl } from '../../../shared/config/api';
 import LanguageDropdown from '../../../shared/components/LanguageDropdown';
 import InfoDialog from '../../../shared/components/InfoDialog';
 import { useLanguage } from '../../../shared/i18n/LanguageContext';
@@ -405,7 +405,7 @@ const LoginScreen = ({
       const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), 10000);
 
-      const response = await fetch(apiUrl('/auth/login'), {
+      const response = await fetch(authApiUrl('/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: emailValue, password: passwordValue }),
